@@ -1,3 +1,6 @@
 # Build output and packaged mods (produced by the GitHub Actions build / local packaging)
 dist/
 build_pkg/
+
+# Packaged mod builds
+package/
