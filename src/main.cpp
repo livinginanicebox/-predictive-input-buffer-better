@@ -1,4 +1,4 @@
-// Click Before Frames v2.94 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
+// Click Before Frames v2.95 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
 // ahead with your input. If the ghost dies, the input is retried with 1..N ticks of
@@ -1956,7 +1956,7 @@ namespace {
     // Prefer a fully safe timing. For an early airborne press, fall back to an
     // activation of that same orb even if the predicted path later crashes.
     int alignOrb(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, int horizon, int releaseAfter, int learned, int* landed,
-        bool fullOnly, bool preferOrb, bool groundPress, bool& originalOrbUsed, bool shipAlign = false) {
+        bool fullOnly, bool preferOrb, bool groundPress, bool& originalOrbUsed, int* judgedWith = nullptr, bool shipAlign = false) {
         originalOrbUsed = false;
         buf.orbWasGround = false;
         int window = st(std::clamp(buf.orbWindow, 1, MAX_TICKS));
@@ -1966,12 +1966,22 @@ namespace {
         buf.orbWasTiming = false;
         buf.orbWasGround = false;
 
+        // v2.95: the reach is at least the alignment window, but never shorter than the stage's
+        // max delay. A press made just in front of an orb whose distance is under the stage's
+        // buffer used to be "inside the window" and only ever searched with a setting-sized
+        // look-ahead; the crash behind the orb was past the end of it, the orb path read safe
+        // and the click passed through unsaved. How early you are is how much delay the buffer
+        // can hold, so the search now spans that whole distance.
+        int reach = st(std::clamp(std::max(buf.orbWindow, buf.ticksAll), 1, MAX_TICKS));
+
         // 1. Cheap probe: without pressing, does the ghost reach an orb soon?
         // v2.94: a press that already touches one orb may be aimed at the NEXT one (frame
         // perfect ship orb chains, "jumps through gaps" orbs) - if the first orb's own timings
         // cannot be used, the probe is re-run letting go first so the next orb is found.
+        // v2.95: the probe must always be the long one. The short probe stopped at the old
+        // window, so a frame-perfect orb a few ticks past it was never seen at all.
         buf.skipPress = true;
-        simulate(layer, p1, p2, dual, 0, true, window + 2, -1, window + 2, &end);
+        simulate(layer, p1, p2, dual, 0, true, reach + 2, -1, reach + 2, &end);
         // v2.94: if nothing is inside the alignment window, look further ahead (up to the
         // stage's max delay). An orb in open air has nothing above or below it, so pressing
         // now is "safe", the press was applied right away and the orb was never clicked -
@@ -1982,8 +1992,13 @@ namespace {
         }
         // v2.94: ship is never held back by a far-away orb - that would change its line for
         // ticks where you were just flying. Ship orbs are handled inside the window only.
-        int probeEnd = shipAlign ? window : std::min(stageCap, st(120));  // 30 frames ahead is plenty
-        if (buf.firstOrbTick < 0 && !groundPress && fullOnly && !shipAlign && probeEnd > window && clickMs() < buf.budgetMs * 0.5) {
+        // v2.95: at least the old 30-frame probe, and never longer than the stage's max delay -
+        // a hold the buffer could not produce is not reachable anyway, and the orb's lateral
+        // distance is not the delay the press needs.
+        int probeEnd = shipAlign ? std::min(window, reach) : stageCap;
+        // v2.95: ground presses probe too. "Click the orb from the platform" is an orb a few
+        // ticks past the alignment window, and skipping the probe left it to the plain jump.
+        if (buf.firstOrbTick < 0 && fullOnly && !shipAlign && probeEnd > window && clickMs() < buf.budgetMs * 0.5) {
             simulate(layer, p1, p2, dual, 0, true, probeEnd + 2, -1, probeEnd + 2, &end);
         }
         buf.skipPress = false;
@@ -1993,7 +2008,10 @@ namespace {
         // v2.82: candidate presses span the whole pass through the orb (the no-press
         // probe saw exactly how long you're inside it), not just the first 6 ticks
         // (1.5f). A frame-perfect orb usually has to be clicked deep inside it.
-        int scanEnd = std::min(window, lastTouch >= touch ? lastTouch + 1 : touch + st(6));
+        // v2.95: and they span the full reach, not only the old window.
+        // v2.95: never shorter than the old +6t scan, even when the orb is further away than the
+        // stage's max delay: those first ticks are the ones the buffer can actually deliver.
+        int scanEnd = std::max(std::min(reach, lastTouch >= touch ? lastTouch + 1 : touch + st(6)), touch + st(6));
         // v2.83: the old +6t scans always finish again. v2.82 put the budget cut at
         // the top of the whole-orb loop, so at high FPS it could stop before even
         // the old range ran. Past these limits the scan is opportunistic, and a
@@ -2009,11 +2027,11 @@ namespace {
         // made safe", the shifted ghost is 0.6px away and may legitimately touch the orb a tick
         // earlier or later - what matters is that it survives, not which orb it used. Requiring the
         // same orb there made almost every click "fragile" and sent it down the re-time path.
-        auto holdsUp = [&](int k, int need, bool sameOrb = true) {
+        auto holdsUp = [&](int k, int need, int judge, bool sameOrb = true) {
             for (float off : { orbShift, -orbShift }) {
                 buf.ghostShiftX = off;
                 SimEnd e;
-                int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &e);
+                int ret = simulate(layer, p1, p2, dual, k, true, judge, releaseAfter, judge, &e);
                 bool ok = ret >= need && (!sameOrb || prediction_policy::sameOrb(targetOrb, buf.usedOrb));
                 buf.ghostShiftX = 0.f;
                 if (!ok) {
@@ -2023,14 +2041,34 @@ namespace {
             return true;
         };
 
-        if (touch >= 0 && touch <= window) {
+        // v2.95: an orb you are already touching is always an orb click, on the ground too.
+        // Before, a ground press sitting on an orb returned at "ground jump is safe" whenever the
+        // jump happened to survive its look-ahead, and the press reached the game as a plain jump
+        // instead of firing the orb you clicked.
+        bool onOrb = prediction_policy::pressOnOrb(touch, buf.queue.empty());
+        // v2.95: the orb pass gets a longer look-ahead than the setting-sized one. A press that
+        // is early for an orb chain (or for the obstacle right behind the orb) only shows its
+        // crash past the old end, read "safe" there and was passed through - the "nothing beats
+        // my click" case. One extra well-spaced orb's worth per orb in the pass, capped so big
+        // stages don't turn every orb click into a whole-level simulation.
+        int orbChain = touch >= 0 ? std::clamp((lastTouch >= touch ? lastTouch : touch) / st(24) + 1, 1, 4) : 1;
+        int orbHorizon = prediction_policy::orbChainLookahead(horizon, orbChain, st(24), st(260));
+        // v2.95: ship keeps its v2.94 judgement horizon exactly. A longer one would call a
+        // working feather unsafe and send it down the re-time path that pushed the ship off its
+        // line - the complaint v2.94 fixed.
+        int orbJudge = shipAlign ? horizon : orbHorizon;
+        if (judgedWith) {
+            *judgedWith = orbJudge;
+        }
+
+        if (touch >= 0 && (touch <= reach || onOrb)) {
             // 2. Pressing now already uses an orb (e.g. held into it).
-            int now = simulate(layer, p1, p2, dual, 0, true, horizon, releaseAfter, horizon, &end);
+            int now = simulate(layer, p1, p2, dual, 0, true, orbJudge, releaseAfter, orbJudge, &end);
             buf.orbNowRet = now;
             // v2.94: a ship press that already survives is NEVER moved. Holding a feather back to
             // catch an orb would change the ship's line for those ticks - ship orb clicks are
             // aligned only when the press as made is not safe (then the orb is what saves it).
-            if (prediction_policy::leaveSafeInput(shipAlign, now >= horizon) && !(buf.orbUsedTick >= 0 && buf.orbUsedTick <= st(2))) {
+            if (prediction_policy::leaveSafeInput(shipAlign, now >= orbJudge) && !(buf.orbUsedTick >= 0 && buf.orbUsedTick <= st(2))) {
                 buf.orbClick = buf.assumeOrbs;
                 return 0;
             }
@@ -2038,7 +2076,7 @@ namespace {
             // held player happens to pass through an orb many ticks later (that press is not an
             // orb click, and re-timing it was a waste of the budget). A press that activates an
             // orb and already survives the look-ahead counts too: a working click is left alone.
-            bool nowUses = (buf.orbUsedTick >= 0 && buf.orbUsedTick <= st(2)) || (buf.orbUsedTick >= 0 && now >= horizon);
+            bool nowUses = (buf.orbUsedTick >= 0 && buf.orbUsedTick <= st(2)) || (buf.orbUsedTick >= 0 && now >= orbJudge);
             // If the player's actual timing already activates an orb, never change
             // that decision just because a prediction dislikes the resulting path.
             // v2.86: with "Orb timing" on, a press inside the orb whose path does NOT
@@ -2047,7 +2085,7 @@ namespace {
             // A click that is already fully safe is always left exactly where it is.
             bool retimingOrb = false;
             if (nowUses) {
-                bool nowSafe = now >= horizon;
+                bool nowSafe = now >= orbJudge;
                 // v2.90: an orb click that only works at the exact predicted spot is one that dies
                 // for real - a fraction of a tick either way and the press lands outside the orb.
                 // That is why almost every orb click read "safe" and never got saved: re-time it
@@ -2055,7 +2093,7 @@ namespace {
                 // v2.94: ship orb clicks keep their timing too (same rule as ship presses): a
                 // straight-fly feather into an orb that works is not retimed for a fraction of a
                 // tick, which only moved the ship off its line.
-                if (nowSafe && buf.robustSaves && !shipAlign && clickMs() < buf.budgetMs && !holdsUp(0, horizon, false)) {
+                if (nowSafe && buf.robustSaves && !shipAlign && clickMs() < buf.budgetMs && !holdsUp(0, orbJudge, orbJudge, false)) {
                     nowSafe = false;
                     if (buf.explain) {
                         trace += " (safe only at the exact spot)";
@@ -2078,7 +2116,10 @@ namespace {
                 // when the jump is fine - an orb in open air used to be skipped entirely because
                 // nothing above or below it made the jump look like a death.
                 bool nearOrb = prediction_policy::groundOrbIntent(touch, st(prediction_policy::GROUND_ORB_REACH));
-                if (now >= horizon && !nearOrb) {
+                // v2.95: `onOrb` (you are standing in the orb right now) overrides the jump:
+                // clicking an orb from a platform is the orb's click even when the plain jump
+                // would have survived, and returning here left the mod jumping past it.
+                if (now >= orbJudge && !nearOrb && !onOrb) {
                     // your ground jump is fine and there's no orb on you: leave it.
                     if (buf.explain) {
                         trace += " (ground jump is safe)";
@@ -2086,17 +2127,20 @@ namespace {
                     buf.orbClick = buf.assumeOrbs;
                     return 0;
                 }
-                if (buf.explain && now >= horizon) {
+                if (buf.explain && now >= orbJudge) {
                     trace += " (orb on you)";
                 }
                 // v2.94: the jump dies (v2.93) or the orb is on you - try the orb ticks. If no
                 // tick inside the orb beats pressing now, the click goes through untouched.
-                buf.orbWasGround = !nowUses && now < horizon;
+                buf.orbWasGround = !nowUses && now < orbJudge;
             }
+            // v2.95: `onOrb` in the air needs no extra handling - a press that is already on an
+            // orb is that orb's click, so the scan below moves it for a tick inside the orb that
+            // lives clearly longer than the click you made.
             // Learned timings are valid only for the specific first orb ahead.
-            if (targetOrb && learned > 0 && learned <= window) {
-                int ret = simulate(layer, p1, p2, dual, learned, true, horizon, releaseAfter, horizon, &end);
-                if (prediction_policy::sameOrb(targetOrb, buf.usedOrb) && ret >= horizon) {
+            if (targetOrb && learned > 0 && learned <= reach) {
+                int ret = simulate(layer, p1, p2, dual, learned, true, orbJudge, releaseAfter, orbJudge, &end);
+                if (prediction_policy::sameOrb(targetOrb, buf.usedOrb) && ret >= orbJudge) {
                     *landed = ret;
                     buf.orbClick = buf.assumeOrbs;
                     return learned;
@@ -2109,6 +2153,10 @@ namespace {
                 //    the orb: where in the orb you click changes where the orb sends you.
                 int bestRet = -1;
                 int fallbackK = 0, fallbackRet = -1;
+                // v2.95: a ground press whose jump is a death, or a press sitting on an orb,
+                // is an orb click just like an airborne one - its fallback onto the orb used to
+                // be disabled (preferOrb was "airborne only"), so the dying jump went through.
+                bool wantOrb = preferOrb || onOrb || buf.orbWasGround;
                 int runStart = -1, safeStart = -1, safeEnd = -1;
                 // v2.87: re-timing never uses the very last tick you are still touching the orb
                 // on - a prediction that is a fraction of a tick off would put the press outside
@@ -2118,7 +2166,7 @@ namespace {
                     if (k > legacyAlignEnd && clickMs() > buf.budgetMs) {
                         break;
                     }
-                    int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &end);
+                    int ret = simulate(layer, p1, p2, dual, k, true, orbJudge, releaseAfter, orbJudge, &end);
                     bool uses = prediction_policy::sameOrb(targetOrb, buf.usedOrb);
                     if (buf.explain) {
                         trace += fmt::format(" +{}:{}{}", k, ret, uses ? "o" : "-");
@@ -2127,12 +2175,12 @@ namespace {
                         break;
                     }
                     // Even if no path is predicted safe, preserve the requested first orb.
-                    if (prediction_policy::betterOrbFallback(preferOrb, uses, ret, fallbackRet)) {
+                    if (prediction_policy::betterOrbFallback(wantOrb, uses, ret, fallbackRet)) {
                         fallbackK = k;
                         fallbackRet = ret;
                     }
                     // v2.82: track the longest fully-safe tick run, centre picked below
-                    if (uses && ret >= horizon) {
+                    if (uses && ret >= orbJudge) {
                         if (runStart < 0) {
                             runStart = k;
                         }
@@ -2156,18 +2204,28 @@ namespace {
                     // v2.92: when the click you made is a death, any tick inside the orb that lives
                     // longer is an improvement - refusing them all meant the mod said "your click
                     // beats the timing" and let a wrong click through untouched.
-                    bool lateOK = retimingOrb && buf.lateCrash > 0 && ret >= st(buf.lateCrash) && ret >= now + st(12);
-                    bool good = retimingOrb ? (ret >= horizon || (now < horizon && ret > now) || lateOK)
-                                            : ret >= std::min(now, horizon);
-                    if (!uses || !good || (!retimingOrb && (fullOnly || k > legacyAlignEnd) && ret < horizon)) {
-                        continue;
-                    }
-                    // v2.94: an airborne press that already works without the orb is only moved
-                    // onto it for a timing that clears the WHOLE look-ahead. Before, moving it
-                    // only had to not die sooner than missing it, so orbs were "clicked" into a
-                    // later death - the "clicks aren't even good" complaint. Cubes keep the
-                    // old fully-safe rule (fullOnly already covers them), ship included.
-                    if (!retimingOrb && !groundPress && now >= horizon && !fullOnly && ret < horizon) {
+                    // v2.95: the "nothing beats my click" case. When the click you made is
+                    // itself a death, an early press used to require a tick inside the orb that
+                    // clears the WHOLE look-ahead; a tick that pushes the crash plainly past the
+                    // orb (and the late-crash line) lost to nothing and the raw click was passed
+                    // straight through. That tick is now a save - for a press made on the orb and
+                    // for one held into it, including the fully-safe-rule modes (cube, robot).
+                    // A re-time of an orb click keeps its own v2.92 rule instead (any tick that
+                    // lives longer than the click you made, or the late-crash rule).
+                    bool full = ret >= orbJudge;
+                    bool dying = now < orbJudge;
+                    // v2.95: the late-crash line is what makes a dying click's orb timing a real
+                    // save - the tick lands in the orb and the crash that is left belongs to the
+                    // obstacle behind it. Without this every such tick lost to nothing and the
+                    // raw click was passed through unsaved ("nothing beats my click").
+                    bool late = prediction_policy::orbLateSave(now, ret, orbJudge,
+                        buf.lateCrash > 0 ? st(buf.lateCrash) : 0, retimingOrb ? st(12) : st(ORB_RETIME_MARGIN));
+                    // v2.94: deep-scan ticks and cube / robot / ship orb paths keep their
+                    // fully-safe rule; a click that already works is never replaced by a later
+                    // death (that is `dying`, below).
+                    bool needsFull = fullOnly || (!retimingOrb && k > legacyAlignEnd);
+                    if (!prediction_policy::orbPickUsable(uses, retimingOrb, full, late, needsFull, dying,
+                            retimingOrb ? ret > now : ret >= now)) {
                         continue;
                     }
                     if (ret > bestRet) {
@@ -2178,7 +2236,7 @@ namespace {
                 }
                 if (safeStart >= 0) {
                     found = (safeStart + safeEnd) / 2;
-                    *landed = horizon;
+                    *landed = orbJudge;
                 }
                 if (retimingOrb && found > 0) {
                     // v2.87/v2.88: a re-timed orb click should work in a real run too, not only at
@@ -2188,16 +2246,16 @@ namespace {
                     // none of them is robust the best pick is still used (and the log says
                     // "fragile") - refusing to click at all was the worse outcome.
                     int need = *landed;
-                    if (buf.robustSaves && clickMs() < buf.budgetMs && !holdsUp(found, need)) {
+                    if (buf.robustSaves && clickMs() < buf.budgetMs && !holdsUp(found, need, orbJudge)) {
                         int pick = 0;
                         if (safeStart >= 0) {
                             for (int k = safeStart; k <= std::min(safeEnd, endK); ++k) {
                                 if (clickMs() > buf.budgetMs) {
                                     break;
                                 }
-                                if (k != found && holdsUp(k, horizon)) {
+                                if (k != found && holdsUp(k, orbJudge, orbJudge)) {
                                     pick = k;
-                                    *landed = horizon;
+                                    *landed = orbJudge;
                                     break;
                                 }
                             }
@@ -2206,7 +2264,7 @@ namespace {
                             if (clickMs() > buf.budgetMs) {
                                 break;
                             }
-                            if (holdsUp(k, need)) {
+                            if (holdsUp(k, need, orbJudge)) {
                                 pick = k;
                             }
                         }
@@ -2228,7 +2286,9 @@ namespace {
                     // orb. An airborne / ship press in front of an orb is that orb's click, so it
                     // is still held onto it when the orb path lives long enough for the crash to
                     // clearly be the NEXT obstacle (the same late-crash line best-effort saves use).
-                    if (now < horizon || fallbackRet >= st(buf.lateCrash) || fallbackRet >= now) {
+                    // v2.95: `onOrb` is the same intent - a press already on the orb is that
+                    // orb's click, so its best activation is kept even when no path is fully safe.
+                    if (now < orbJudge || fallbackRet >= st(buf.lateCrash) || fallbackRet >= now) {
                         found = fallbackK;
                         *landed = fallbackRet;
                     }
@@ -2240,18 +2300,26 @@ namespace {
                     trace.empty() ? " (nothing to try)" : trace, found > 0 ? fmt::format("+{}t", found) : std::string("no pick"));
             }
         }
-        else if (touch > window && touch <= probeEnd && !groundPress && fullOnly && !shipAlign) {
+        else if (touch > window && touch > 0 && touch <= probeEnd && fullOnly && !shipAlign) {
             // v2.94: the orb is further ahead than the alignment window. Hold the press until a
             // tick inside it that clears the whole look-ahead - this is what used to do nothing
-            // at all (press applied to the game, orb missed, fall). Only cube-style airborne
-            // presses take this path, and only with a path that is fully safe.
+            // at all (press applied to the game, orb missed, fall).
+            // v2.95: a far orb whose path only dies to what is behind it is still that orb's
+            // click: a timing that lives clearly past your click (and the late-crash line) is
+            // now used instead of the press going through unsaved. That is the other half of
+            // "nothing beats my click" - the orb was never reached at all.
+            int farChain = std::clamp((lastTouch >= touch ? lastTouch : touch) / st(24) + 1, 1, 4);
+            int farHorizon = prediction_policy::orbChainLookahead(orbHorizon, farChain, st(24), st(320));
+            int now = simulate(layer, p1, p2, dual, 0, true, farHorizon, releaseAfter, farHorizon, &end);
+            buf.orbNowRet = now;
             int endK = std::min({ lastTouch >= touch ? lastTouch + 1 : touch + st(6), touch + st(6), probeEnd });
             int runStart = -1, safeStart = -1, safeEnd = -1;
+            int lateK = 0, lateRet = -1;
             for (int k = std::max(1, touch - 1); k <= endK; ++k) {
                 if (clickMs() > buf.budgetMs) {
                     break;
                 }
-                int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &end);
+                int ret = simulate(layer, p1, p2, dual, k, true, farHorizon, releaseAfter, farHorizon, &end);
                 bool uses = prediction_policy::sameOrb(targetOrb, buf.usedOrb);
                 if (buf.explain) {
                     trace += fmt::format(" +{}:{}{}", k, ret, uses ? "o" : "-");
@@ -2259,7 +2327,7 @@ namespace {
                 if (end == SimEnd::StopSearch) {
                     break;
                 }
-                if (uses && ret >= horizon) {
+                if (uses && ret >= farHorizon) {
                     if (runStart < 0) {
                         runStart = k;
                     }
@@ -2271,11 +2339,25 @@ namespace {
                 else {
                     runStart = -1;
                 }
+                if (uses && ret > lateRet && prediction_policy::orbLateSave(now, ret, farHorizon,
+                        buf.lateCrash > 0 ? st(buf.lateCrash) : 0, st(ORB_RETIME_MARGIN))) {
+                    lateK = k;
+                    lateRet = ret;
+                }
             }
             if (safeStart >= 0) {
                 found = (safeStart + safeEnd) / 2;
-                *landed = horizon;
+                *landed = farHorizon;
                 buf.orbWasTiming = false;
+            }
+            else if (lateK > 0 && now < farHorizon) {
+                // v2.95: best effort, only when the click you made is itself a death - this
+                // timing is the orb's click and it pushes the crash plainly further out. A
+                // press that already works is never swapped for one that dies later.
+                found = lateK;
+                *landed = lateRet;
+                buf.orbWasTiming = false;
+                buf.orbWasGround = groundPress;
             }
             if (buf.explain) {
                 say("orb ahead at t{} (outside the {}t window): hold the press |{} => {}", touch, window,
@@ -3365,6 +3447,12 @@ namespace {
         // to a different orb. Pending input sequences must stay ordered, however.
         bool touchingOrb = (p1->m_touchingRings && p1->m_touchingRings->count() > 0) ||
             (p2 && p2->m_touchingRings && p2->m_touchingRings->count() > 0);
+        // v2.95: on the ground a press is a JUMP, so an orb you are standing in never fires -
+        // unless "also from the ground" is on. With it off, a ground press went straight to the
+        // game through passOrbPress below and the jump into the obstacle was never predicted at
+        // all (the "it won't even let me click it" case). Such a press now goes through orb
+        // alignment when the jump is a death, so it is held until the ghost is inside the orb.
+        bool groundedOnOrb = touchingOrb && p1->m_isOnGround && (!p2 || p2->m_isOnGround) && !buf.orbAlignGround;
         // v2.86: "Orb timing" used to do nothing at all for the clicks that actually hit
         // an orb: a press made inside an orb was always passed straight to the game, so
         // neither the window nor the timing setting could change an orb click. With orb
@@ -3375,7 +3463,7 @@ namespace {
         bool orbRetime = down && touchingOrb && buf.queue.empty() && buf.smart && buf.orbAlign && buf.orbTiming &&
             !p1->m_isDart && !(p2 && p2->m_isDart) &&
             (p1->m_isOnGround && (!p2 || p2->m_isOnGround) ? buf.orbAlignGround : true);
-        if (prediction_policy::passOrbPress(down, touchingOrb, buf.queue.empty(), orbRetime)) {
+        if (prediction_policy::passOrbPress(down, touchingOrb && !groundedOnOrb, buf.queue.empty(), orbRetime)) {
             buf.appliedInput = true;
             if (buf.explain) {
                 say("pass press: touching an orb (player's timing)");
@@ -3566,13 +3654,14 @@ namespace {
             // path clears the whole look-ahead, never just when it dies later than pressing now.
             bool fullOnlyAlign = cubeOnly || anyRobot || anyShip;  // v2.84: robot gets cube's rule
             int orbLanded = 0;
+            int orbJudged = 0;  // v2.95: the look-ahead the orb path was actually judged with
             bool originalOrbUsed = false;
             // Previously failed saves should not permanently block an airborne orb
             // press: the player may still want that orb despite a predicted death.
             int k = memorySaysSkip(sliceOf(p1)) && grounded
                 ? 0
                 : alignOrb(layer, p1, p2, dual, horizon, releaseAfter, memoryDelay(sliceOf(p1)), &orbLanded, fullOnlyAlign, !grounded, grounded,
-                      originalOrbUsed, anyShip);
+                      originalOrbUsed, &orbJudged, anyShip);
             if (originalOrbUsed) {
                 buf.appliedInput = down;
                 return false;
@@ -3583,19 +3672,26 @@ namespace {
                 return false;
             }
             if (k > 0) {
+                // v2.95: the orb path is judged against its own (longer) look-ahead, so the log
+                // and the save bookkeeping use that instead of the setting-sized one.
+                int orbNeed = orbJudged ? orbJudged : horizon;
                 if (buf.orbWasTiming) {
                     say("ORB timing +{}t ({:g}f): your click {}t -> {}t{}", k, k * TICK, buf.orbNowRet, orbLanded,
-                        orbLanded >= horizon ? std::string(" (clears the look-ahead)")
+                        orbLanded >= orbNeed ? std::string(" (clears the look-ahead)")
                                              : fmt::format(" (your click dies at {}t, this one lives longer but still dies later)", buf.orbNowRet));
                 }
                 else if (buf.orbWasGround) {
-                    say("ORB press +{}t ({:g}f): your ground jump died at {}t, the click now lands in the orb -> {}t", k, k * TICK,
-                        buf.orbNowRet, orbLanded);
+                    // v2.95: distinguish "the jump dies and the orb saves it" from "the orb is
+                    // under you, and the click fires it instead of jumping past it".
+                    bool jumpDied = buf.orbNowRet < orbNeed;
+                    say(jumpDied ? "ORB press +{}t ({:g}f): your ground jump dies at {}t, the click now lands in the orb -> {}t"
+                                 : "ORB press +{}t ({:g}f): your jump left the orb unclicked, the click now fires it -> {}t",
+                        k, k * TICK, buf.orbNowRet, orbLanded);
                 }
                 else {
                     say("ORB press +{}t ({:g}f) -> {}t", k, k * TICK, orbLanded);
                 }
-                if (orbLanded >= horizon) {
+                if (orbLanded >= orbNeed) {
                     noteSave(layer, k);
                 }
                 decided(layer, p1, p2, dual, k, down, horizon, releaseAfter);
@@ -3945,15 +4041,28 @@ namespace {
                 }
             }
         }
+        // v2.95: the v2.90 "leave your fragile click alone" rule was the "nothing beats my
+        // click" report. A click that only survives at the exact predicted spot - half a tick
+        // either way it dies - was passed straight to the game whenever the save found for it
+        // was not perfectly robust either, i.e. whenever both were fragile. Passing the click
+        // the prediction already knows dies for real is the worse of the two, so the save is
+        // used and marked fragile. Only when that save also survives at least as long as your
+        // click does; a best-effort save (already bound to die to the next obstacle) is never
+        // swapped in for a click that lives longer.
+        bool fragileNote = false;
         if (fragilePass && !chosenRobust) {
-            // v2.90: your click already worked at the exact predicted spot and no delay holds up
-            // better, so leave it alone instead of moving a working click for nothing.
-            if (buf.explain) {
-                say("pass {}{}: no delay holds up better than the click you made", down ? "press" : "release", tickTag);
+            if (lateSave || landed < base) {
+                if (buf.explain) {
+                    say("pass {}{}: no delay holds up better than the click you made", down ? "press" : "release", tickTag);
+                }
+                decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
+                buf.appliedInput = down;
+                return false;
             }
-            decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
-            buf.appliedInput = down;
-            return false;
+            fragileNote = true;
+            if (buf.explain) {
+                say("fragile click: your click dies half a tick either way, using the +{}t save (not robust either) instead of passing it", saved);
+            }
         }
 
         if (buf.avoidMovers) {
@@ -3981,6 +4090,7 @@ namespace {
         noteSave(layer, saved);
         say("SAVED {}{} +{}t ({:g}f)  {}->{}  [max {}]{}", down ? "press" : "release", tickTag, saved, saved * TICK, base, landed, maxDelay,
             lateSave ? fmt::format("  (best effort, crash t{})", landed)
+            : fragileNote ? std::string("  (fragile)")
             : robustNote ? std::string("  (robust)")
             : fromMemory ? std::string("  (memory)")
             : cubeStyleWave && marginUsed ? std::string("  +margin")
@@ -4511,7 +4621,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.85 loaded. F3 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v2.95 loaded. F3 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {

@@ -63,5 +63,36 @@ int main2() {
     assert(straightBand(true) < straightBand(false));
     assert(straightBand(true) >= 60.f);
     assert(straightBand(false) >= 90.f);
+
+    // v2.95: an orb the press is already touching belongs to the player, on the ground too,
+    // and a timing inside the orb that lives clearly past a dying click is a save.
+    assert(passOrbPress(true, true, true, false));
+    // ...but a ground press standing in an orb does not: it is a jump, so it gets predicted
+    // (passOrbPress is called with the touched-orb flag cleared for it).
+    assert(!passOrbPress(true, false, true, false));
+    assert(pressOnOrb(0, true));
+    assert(!pressOnOrb(0, false));   // a queued input must keep its order
+    assert(!pressOnOrb(3, true));
+    assert(orbLateSave(10, 60, 200, 0, 20));      // late line off: just must live longer
+    assert(!orbLateSave(10, 25, 200, 0, 20));     // not clearly longer than the click
+    assert(orbLateSave(10, 95, 200, 90, 20));     // past the late-crash line
+    assert(!orbLateSave(10, 80, 200, 90, 20));    // dies at the orb itself
+    assert(!orbLateSave(200, 300, 200, 0, 20));   // the click already cleared: nothing to save
+    // full clear is always usable; a dying click + a clearly later tick is the v2.95 fix
+    assert(orbPickUsable(true, false, true, false, true, true, false));
+    assert(orbPickUsable(true, false, false, true, true, true, false));   // late save, cube too
+    assert(orbPickUsable(true, false, false, true, false, true, false));  // late save, other modes
+    assert(!orbPickUsable(false, false, false, true, false, true, false)); // never a non-orb tick
+    assert(!orbPickUsable(true, false, false, false, true, true, true));   // needs full: no
+    assert(!orbPickUsable(true, false, false, false, false, false, true)); // working click stays
+    assert(orbPickUsable(true, false, false, false, false, true, true));   // dying click, lives as long
+    // v2.92: a re-time only needs to live longer, whatever the mode needs for a fresh press
+    assert(orbPickUsable(true, true, false, false, false, true, true));
+    assert(!orbPickUsable(true, true, false, false, false, true, false));
+    assert(orbPickUsable(true, true, false, true, false, true, false));    // late line saves it
+    assert(orbChainLookahead(142, 0, 24, 260) == 142);
+    assert(orbChainLookahead(142, 1, 24, 260) == 166);
+    assert(orbChainLookahead(142, 4, 24, 260) == 238);
+    assert(orbChainLookahead(240, 4, 24, 260) == 260);  // capped for big stages
     return 0;
 }
