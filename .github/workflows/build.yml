@@ -1,6 +1,4 @@
 #name: Build Mod
-permissions:
-  contents: write
 on:
   workflow_dispatch:
   push:
@@ -27,16 +25,3 @@ jobs:
         with:
           name: Build Output
           path: ${{ steps.build.outputs.build-output }}
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_name }}
-      - name: Store package on the branch
-        run: |
-          mkdir -p dist
-          cp -Rv "${{ steps.build.outputs.build-output }}/." dist/ 2>/dev/null || cp -Rv "${{ steps.build.outputs.build-output }}" dist/
-          find dist -type f -printf '%p %s bytes\n'
-          git config user.name "arena-agent"
-          git config user.email "agent@arena.ai"
-          git add -f dist
-          git commit -m "ci: packaged build ${GITHUB_SHA::7}" || echo "nothing to commit"
-          git push origin HEAD:${GITHUB_REF_NAME}
