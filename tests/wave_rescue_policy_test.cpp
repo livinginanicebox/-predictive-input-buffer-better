@@ -31,6 +31,14 @@ int main() {
     assert(clearsNextTurn(true, 75, 55, 20));
     assert(!clearsNextTurn(false, 75, 55, 20)); // delayed dash release never fired
 
+    // v2.95 tight corridors: a turn that clears a short stretch of room counts, and inverted
+    // wave only needs a little more room than upright.
+    assert(tightTurnSurvives(26, 20, 6));
+    assert(!tightTurnSurvives(25, 20, 6));
+    assert(tightClearance(false) == 6);
+    assert(tightClearance(true) > tightClearance(false));
+    assert(tightTurnSurvives(tightClearance(true) + 20, 20, tightClearance(true)));
+
     GravityPortalTracker<int> portals;
     int portal = 1, other = 2;
     assert(portals.activate(&portal, false));

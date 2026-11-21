@@ -1,5 +1,6 @@
 #include "../src/prediction_policy.hpp"
 #include <cassert>
+#include <cmath>
 
 struct Player {
     bool m_isDart;
@@ -43,7 +44,10 @@ int main() {
     assert(waveEscape(true, 16, 24) == 24);
     assert(!strictWaveRecovery(false, false));
     assert(strictWaveRecovery(true, false));
-    assert(strictWaveRecovery(false, true));
+    // v2.95: a gravity portal in the middle of a prediction no longer makes the whole run
+    // "strict" (that is what made upside-down <-> normal transitions the hardest part to
+    // buffer); only starting inverted keeps the small extra margin.
+    assert(!strictWaveRecovery(false, true));
     assert(strictWaveRecovery(true, true));
     return main2();
 }
@@ -63,5 +67,44 @@ int main2() {
     assert(straightBand(true) < straightBand(false));
     assert(straightBand(true) >= 60.f);
     assert(straightBand(false) >= 90.f);
+
+    // v2.95 frame counter: ticks -> frames from the real step length, with decimals that fit.
+    // 240 steps/s (60 fps): one tick is a quarter frame, 33 ticks are 8.25 frames.
+    assert(std::abs(framesFromTicks(1, 1.0 / 240.0) - 0.25) < 1e-9);
+    assert(std::abs(framesFromTicks(8, 1.0 / 240.0) - 2.0) < 1e-9);
+    assert(std::abs(framesFromTicks(33, 1.0 / 240.0) - 8.25) < 1e-9);
+    // Unlocked FPS: 1/288 s steps give 8.33 frames for 40 ticks.
+    assert(std::abs(framesFromTicks(40, 1.0 / 288.0) - 8.3333) < 1e-3);
+    assert(frameDecimals(0.25) == 2);   // 0.25f
+    assert(frameDecimals(1.9) == 2);    // 1.9f
+    assert(frameDecimals(8.33) == 2);   // 8.33f
+    assert(frameDecimals(12.5) == 1);   // 12.5f
+    assert(frameDecimals(240.0) == 0);  // 240f
+    assert(framesFromTicks(4, 0.0) > 0.9);  // a bad step length falls back to 240/s
+
+    // v2.95 orbs: a press inside an orb is never pushed behind a waiting delay.
+    assert(orbPressOvertakesQueue(true, true, false));
+    assert(!orbPressOvertakesQueue(true, true, true));
+    assert(!orbPressOvertakesQueue(false, true, false));
+    assert(!orbPressOvertakesQueue(true, false, false));
+    // ... and a press in front of an orb is that orb's click.
+    assert(orbFallbackWanted(true, true, ORB_FALLBACK_MIN_LIFE, ORB_FALLBACK_MIN_LIFE));
+    assert(!orbFallbackWanted(true, true, ORB_FALLBACK_MIN_LIFE - 1, ORB_FALLBACK_MIN_LIFE));
+    assert(!orbFallbackWanted(true, false, 200, ORB_FALLBACK_MIN_LIFE));
+    assert(!orbFallbackWanted(false, true, 200, ORB_FALLBACK_MIN_LIFE));
+    // A dying click is never "the best click".
+    assert(orbClickBeatsAll(true, false));
+    assert(orbClickBeatsAll(false, true));
+    assert(!orbClickBeatsAll(false, false));
+
+    // v2.95 ship: only full clears or short taps whose crash moves further out.
+    int horizon = 80;
+    assert(shipDelayAccepted(false, 2, 20, 30, horizon, SHIP_MAX_TAP_DELAY, SHIP_CRASH_MARGIN));  // 2+30 >= 20+12
+    assert(!shipDelayAccepted(false, 2, 40, 30, horizon, SHIP_MAX_TAP_DELAY, SHIP_CRASH_MARGIN)); // 2+30 < 40+12
+    assert(!shipDelayAccepted(true, 2, 20, 30, horizon, SHIP_MAX_TAP_DELAY, SHIP_CRASH_MARGIN));  // straight-fly: no marginal
+    assert(!shipDelayAccepted(false, SHIP_MAX_TAP_DELAY + 1, 20, 30, horizon, SHIP_MAX_TAP_DELAY, SHIP_CRASH_MARGIN)); // long delay
+    assert(shipDelayAccepted(false, 40, 20, 30, horizon, SHIP_MAX_TAP_DELAY, SHIP_CRASH_MARGIN) == false);
+    assert(shipDelayAccepted(false, 40, 20, horizon, horizon, SHIP_MAX_TAP_DELAY, SHIP_CRASH_MARGIN)); // full clear, any delay
+    assert(SHIP_MAX_TAP_DELAY <= 12);  // at most a few frames, never a big retime
     return 0;
 }

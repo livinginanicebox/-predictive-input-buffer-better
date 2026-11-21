@@ -1,9 +1,29 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 
 // Policy values are in physics ticks; callers convert 240 Hz constants with st().
 namespace prediction_policy {
+    // v2.95 frame counter. The console used to print frames as ticks * 0.25, i.e. always a
+    // multiple of a quarter frame, so a save of one or two ticks read as "0f" or as the same
+    // number as its neighbour. Frames are now derived from the real physics step length (so
+    // unlocked FPS gives values like 1.9 or 8.33 too) and printed with as many decimals as the
+    // number needs: two below 10 frames, one below 100, none above.
+    inline int frameDecimals(double frames) {
+        double magnitude = std::abs(frames);
+        if (magnitude < 10.0) {
+            return 2;
+        }
+        return magnitude < 100.0 ? 1 : 0;
+    }
+
+    inline double framesFromTicks(double ticks, double stepSeconds) {
+        if (!(stepSeconds > 0.0001)) {
+            stepSeconds = 1.0 / 240.0;
+        }
+        return ticks * stepSeconds * 60.0;
+    }
     // Never reorder a pending input sequence. Otherwise let an intentional press on
     // an orb reach the game unchanged, regardless of the predicted outcome - unless
     // "orb timing" is on and the press may be re-timed inside that same orb.
@@ -20,6 +40,31 @@ namespace prediction_policy {
         return enabled && sameTarget && survival > bestSurvival;
     }
 
+    // v2.95: an orb click is never pushed behind a pending delay. The press used to be shifted
+    // by whatever delay was already waiting, which put the click outside the orb - the orb never
+    // fired and it looked like the mod skipped the orb you clicked.
+    constexpr bool orbPressOvertakesQueue(bool down, bool touchingOrb, bool queueEmpty) {
+        return down && touchingOrb && !queueEmpty;
+    }
+
+    // v2.95: a press in front of an orb is that orb's click, even when pressing now "survives"
+    // because the orb sits in open air (nothing above or below it). Missing the orb is not what
+    // the player asked for, so the press is moved onto the orb as long as the click really fires
+    // it and does not die on the spot.
+    constexpr int ORB_FALLBACK_MIN_LIFE = 4;  // 1 frame at 60 fps
+
+    constexpr bool orbFallbackWanted(bool preferOrb, bool usesOrb, int orbSurvival, int minSurvival) {
+        return preferOrb && usesOrb && orbSurvival >= minSurvival;
+    }
+
+    // v2.95: your orb click is only "the best click" when it survives the look-ahead. A click
+    // that dies inside it, with nothing inside the orb living longer, has to go to the normal
+    // search (which can delay it) instead of being passed through with a "nothing beats your
+    // click" line while it leads straight into a crash.
+    constexpr bool orbClickBeatsAll(bool clickSurvivesLookahead, bool foundBetter) {
+        return clickSurvivesLookahead || foundBetter;
+    }
+
     template <typename Player>
     bool invertedWave(Player const* p1, Player const* p2, bool dual) {
         return (p1 && p1->m_isDart && p1->m_isUpsideDown) ||
@@ -30,8 +75,13 @@ namespace prediction_policy {
         return invertedWave ? std::min(configuredGap, invertedGap) : configuredGap;
     }
 
+    // v2.95: inverted wave is no longer judged twice as strictly, and a gravity portal in the
+    // middle of a prediction no longer turns the whole run into a "strict recovery" (that made
+    // the upside-down <-> normal transitions the player wants to spam through the hardest part
+    // to buffer). Inverted wave keeps a small extra margin (see the call site) instead.
     constexpr bool strictWaveRecovery(bool startedInverted, bool gravityChanged) {
-        return startedInverted || gravityChanged;
+        (void)gravityChanged;
+        return startedInverted;
     }
 
     inline int waveMinimumTurn(bool invertedWave, int normalMinimum, int invertedMinimum) {
@@ -70,6 +120,28 @@ namespace prediction_policy {
     // "wobbly" and retimed taps that did not need it.
     inline float straightBand(bool mini) {
         return mini ? 60.f : 90.f;
+    }
+
+    // v2.95: ship buffering is deliberately conservative. A delayed ship input changes every
+    // tick of the line after it, so delaying a tap "because the crash moves later" was what flew
+    // the ship up or down into the next obstacle. A ship delay now has to either clear the whole
+    // look-ahead, or be a short tap (at most 2 frames at 240 ticks) whose crash genuinely moves
+    // further out. Straight-fly rhythms are never retimed for a marginal gain.
+    constexpr int SHIP_MAX_TAP_DELAY = 8;  // ticks (2 frames at 60 fps)
+
+    constexpr int SHIP_CRASH_MARGIN = 12;  // the crash has to move at least this much further
+
+    constexpr bool shipDelayAccepted(bool straightFly, int delay, int pressNowCrash, int delayedCrash, int horizon,
+        int maxTapDelay, int margin) {
+        if (delayedCrash >= horizon) {
+            return true;  // clears the whole look-ahead: a real save
+        }
+        if (straightFly || pressNowCrash >= horizon || delay > maxTapDelay) {
+            return false;
+        }
+        // Both crashes measured from now: pressing now crashes at pressNowCrash, the delayed
+        // tap crashes `delay` ticks later, at delay + delayedCrash.
+        return delay + delayedCrash >= pressNowCrash + margin;
     }
 
 }

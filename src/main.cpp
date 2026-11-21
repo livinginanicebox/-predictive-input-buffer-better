@@ -1,9 +1,10 @@
-// Click Before Frames v2.94 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
+// Click Before Frames v2.95 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
 // ahead with your input. If the ghost dies, the input is retried with 1..N ticks of
 // delay and, if a delayed version clearly survives longer, your input is held back
-// and delivered that many physics ticks later. 1 tick = 1/240 s = 0.25 frames @ 60fps.
+// and delivered that many physics ticks later. 1 tick = 1/240 s = 0.25 frames @ 60fps
+// (v2.95: the console prints real frames with decimals, e.g. 0.25f, 1.9f, 8.33f).
 //
 // v2 changes:
 //  - Bigger windows: F6 stages up to 128 ticks (32 frames), a CUSTOM stage (settings, any
@@ -235,6 +236,9 @@ namespace {
         bool orbWasTiming = false;   // v2.26: the last orb save re-timed a press that was already in the orb
         bool orbWasGround = false;   // v2.93: the last orb save moved a ground press (a jump) into an orb
         int orbNowRet = 0;           // v2.87: ticks the click you actually made survived (for the log)
+        bool orbNowDies = false;     // v2.95: the orb click you made dies inside the look-ahead
+        bool orbBestEffort = false;  // v2.95: the press was moved onto the orb with no fully safe timing
+        bool orbUrgent = false;      // v2.95: the click was sent now instead of behind a pending delay
 
         bool tryBothOrbs = true;     // v2.4: if a run touches an orb and dies, retry with the other orb choice
         bool orbClick = true;        // v2.4: orb choice of the current run
@@ -249,6 +253,8 @@ namespace {
         int spamGap = 16;            // v2.5.2: inputs closer than this (ticks) count toward wave spam
         bool waveMargin = true;      // v2.10: center wave saves in the safe window (1 tick of room)
         bool waveV46 = false;        // v2.7: use the old v4.6 wave rules instead of the cube-style ones
+        bool waveTight = true;       // v2.95: tight corridors count as turn-away saves (fast spam)
+        bool shipMarginal = false;   // v2.95: the ship save is a short tap whose crash moves later
         bool orbAlign = true;        // v2.6: hold an early press back until the ghost is inside the orb
         bool orbAlignGround = false; // v2.11.1: also align presses made on the ground (jumps)
         bool ignoreTouching = true;  // v2.31: hazards you touch right now without dying can't kill the ghost
@@ -349,6 +355,40 @@ namespace {
             return ticks240;
         }
         return std::max(1, static_cast<int>(std::lround(ticks240 * stepScale())));
+    }
+
+    // v2.95 frame counter. Everything used to be printed as ticks * 0.25 ("{:g}f"), so a save of
+    // 1 or 2 ticks showed up as 0.25f / 0.5f and an unlocked-FPS save could show the same "frame"
+    // as its neighbour. Frames now come from the real physics step length and keep the decimals
+    // the value needs: 0.3f, 1.9f, 8.33f, 12.4f, 240f.
+    double framesOf(double ticks) {
+        double step = buf.tickLength > 0.001f ? static_cast<double>(buf.tickLength) : (1.0 / 240.0);
+        return prediction_policy::framesFromTicks(ticks, step);
+    }
+
+    std::string formatFrames(double frames) {
+        int decimals = prediction_policy::frameDecimals(frames);
+        std::string text = fmt::format("{:.{}f}", frames, decimals);
+        if (text.find('.') != std::string::npos) {
+            while (!text.empty() && text.back() == '0') {
+                text.pop_back();
+            }
+            if (!text.empty() && text.back() == '.') {
+                text.push_back('0');
+            }
+        }
+        return text + "f";
+    }
+
+    // Physics ticks at the current rate (delays, look-aheads, crashes).
+    std::string frameText(double ticks) {
+        return formatFrames(framesOf(ticks));
+    }
+
+    // A time already stored in 240-per-second units (stages, practice stats): 240 of those are
+    // one second, so one of them is always a quarter frame, whatever the physics rate is.
+    std::string frameText240(double ticks240) {
+        return formatFrames(prediction_policy::framesFromTicks(ticks240, 1.0 / 240.0));
     }
 
     // v2.4 moving-object guard: last known position of each object the ghost collided with.
@@ -545,6 +585,7 @@ namespace {
         buf.robotAutoRelease = mod->getSettingValue<bool>("robot-auto-release");
         buf.autoNormalRuns = mod->getSettingValue<bool>("auto-release-normal-runs");
         buf.waveV46 = mod->getSettingValue<bool>("wave-v46");
+        buf.waveTight = mod->getSettingValue<bool>("wave-tight");  // v2.95
         buf.waveMargin = mod->getSettingValue<bool>("wave-safety-margin") && !buf.lowLatency;
         buf.orbWindow = static_cast<int>(mod->getSettingValue<int64_t>("orb-align-ticks"));
         // v2.71 performance mode: for PCs that drop frames on clicks. Shorter searches, no
@@ -621,8 +662,8 @@ namespace {
             buf.smart, buf.fullState, buf.robustSaves, buf.lateCrash, buf.practiceOnly);
         text += fmt::format("orbs: align {} (ground {}, {}t) timing {} assume {} both {} | memory {} ({} spots)\n", buf.orbAlign,
             buf.orbAlignGround, buf.orbWindow, buf.orbTiming, buf.assumeOrbs, buf.tryBothOrbs, buf.learn, memorySpots());
-        text += fmt::format("wave: v4.6 {} margin {} horizon {} spam gap {} | robot smart {} | spider smart {} | ship {} (same max delay as every mode)\n",
-            buf.waveV46, buf.waveMargin, buf.waveHorizon, buf.spamGap, buf.robotSmart, buf.spiderSmart, buf.shipBuffer);
+        text += fmt::format("wave: v4.6 {} margin {} tight corridors {} horizon {} spam gap {} | robot smart {} | spider smart {} | ship {} (same max delay as every mode)\n",
+            buf.waveV46, buf.waveMargin, buf.waveTight, buf.waveHorizon, buf.spamGap, buf.robotSmart, buf.spiderSmart, buf.shipBuffer);
         text += fmt::format("auto-release: wave {} robot {} dash {} normal runs {} window {} | movers: avoid {} predict {}\n",
             buf.autoRelease, buf.robotAutoRelease, buf.dashAutoRelease, buf.autoNormalRuns, buf.autoWindow, buf.avoidMovers,
             buf.predictMovers);
@@ -655,7 +696,7 @@ namespace {
         if (STAGES[buf.stage].unlimited) {
             return fmt::format("Buffer: unlimited (all modes){}", buf.train ? " [training]" : "");
         }
-        return fmt::format("Buffer{}: {:g}f (all modes){}", STAGES[buf.stage].custom ? " (custom)" : "", buf.ticksAll * TICK,
+        return fmt::format("Buffer{}: {} (all modes){}", STAGES[buf.stage].custom ? " (custom)" : "", frameText240(buf.ticksAll),
             buf.train ? " [training]" : "");
     }
 
@@ -1965,6 +2006,8 @@ namespace {
         buf.orbClick = false;  // the press being tested is the orb click
         buf.orbWasTiming = false;
         buf.orbWasGround = false;
+        buf.orbNowDies = false;      // v2.95
+        buf.orbBestEffort = false;   // v2.95
 
         // 1. Cheap probe: without pressing, does the ghost reach an orb soon?
         // v2.94: a press that already touches one orb may be aimed at the NEXT one (frame
@@ -1983,7 +2026,12 @@ namespace {
         // v2.94: ship is never held back by a far-away orb - that would change its line for
         // ticks where you were just flying. Ship orbs are handled inside the window only.
         int probeEnd = shipAlign ? window : std::min(stageCap, st(120));  // 30 frames ahead is plenty
-        if (buf.firstOrbTick < 0 && !groundPress && fullOnly && !shipAlign && probeEnd > window && clickMs() < buf.budgetMs * 0.5) {
+        // v2.95: every mode probes the full distance (not only cubes), and a press made on the
+        // ground does too when ground orb clicks are enabled. An orb 40 ticks ahead used to be
+        // outside the probe, so the press was applied right away and fell straight through it.
+        bool probeFurther = !shipAlign && probeEnd > window && clickMs() < buf.budgetMs * 0.5 &&
+            (!groundPress || buf.orbAlignGround);
+        if (buf.firstOrbTick < 0 && probeFurther) {
             simulate(layer, p1, p2, dual, 0, true, probeEnd + 2, -1, probeEnd + 2, &end);
         }
         buf.skipPress = false;
@@ -2027,6 +2075,7 @@ namespace {
             // 2. Pressing now already uses an orb (e.g. held into it).
             int now = simulate(layer, p1, p2, dual, 0, true, horizon, releaseAfter, horizon, &end);
             buf.orbNowRet = now;
+            buf.orbNowDies = now < horizon;  // v2.95: your orb click is a death
             // v2.94: a ship press that already survives is NEVER moved. Holding a feather back to
             // catch an orb would change the ship's line for those ticks - ship orb clicks are
             // aligned only when the press as made is not safe (then the orb is what saves it).
@@ -2109,6 +2158,7 @@ namespace {
                 //    the orb: where in the orb you click changes where the orb sends you.
                 int bestRet = -1;
                 int fallbackK = 0, fallbackRet = -1;
+                int lastResortK = 0, lastResortRet = -1;  // v2.95: longest-living tick that fires the orb
                 int runStart = -1, safeStart = -1, safeEnd = -1;
                 // v2.87: re-timing never uses the very last tick you are still touching the orb
                 // on - a prediction that is a fraction of a tick off would put the press outside
@@ -2125,6 +2175,12 @@ namespace {
                     }
                     if (end == SimEnd::StopSearch) {
                         break;
+                    }
+                    // v2.95: remember the longest-living tick that really fires the orb, even when
+                    // it fails the "good" rules below. It is the last resort for a dying click.
+                    if (uses && ret > lastResortRet) {
+                        lastResortK = k;
+                        lastResortRet = ret;
                     }
                     // Even if no path is predicted safe, preserve the requested first orb.
                     if (prediction_policy::betterOrbFallback(preferOrb, uses, ret, fallbackRet)) {
@@ -2180,6 +2236,18 @@ namespace {
                     found = (safeStart + safeEnd) / 2;
                     *landed = horizon;
                 }
+                // v2.95: the click you made is a death and nothing inside the orb lives longer.
+                // Do not call that click the best one: use the longest-living tick that still
+                // fires the orb (and at least does not die sooner). If even that does not exist,
+                // the press falls through to the normal search below, which can delay it.
+                if (retimingOrb && found == 0 && now < horizon && lastResortK > 0 && lastResortRet > now) {
+                    found = lastResortK;
+                    *landed = lastResortRet;
+                    buf.orbBestEffort = true;
+                    if (buf.explain) {
+                        trace += " (best effort: your click dies at " + std::to_string(now) + "t)";
+                    }
+                }
                 if (retimingOrb && found > 0) {
                     // v2.87/v2.88: a re-timed orb click should work in a real run too, not only at
                     // the exact predicted spot. With "Robust saves" on, the tick is first tested
@@ -2228,25 +2296,40 @@ namespace {
                     // orb. An airborne / ship press in front of an orb is that orb's click, so it
                     // is still held onto it when the orb path lives long enough for the crash to
                     // clearly be the NEXT obstacle (the same late-crash line best-effort saves use).
-                    if (now < horizon || fallbackRet >= st(buf.lateCrash) || fallbackRet >= now) {
+                    // v2.95: the press you just made misses the orb, so the orb you are trying to
+                    // click is what matters here. Even when pressing now "survives" (an orb in
+                    // open air has nothing above or below it), the press is held onto the orb as
+                    // long as the orb click fires and lives at least a frame. This was the
+                    // "it skips the orb I'm trying to click" case: the press was applied where it
+                    // was, fell through the orb and the orb never fired.
+                    bool orbWantedByPlayer = prediction_policy::orbFallbackWanted(preferOrb, true, fallbackRet,
+                        st(prediction_policy::ORB_FALLBACK_MIN_LIFE));
+                    if (orbWantedByPlayer || now < horizon || fallbackRet >= st(buf.lateCrash) || fallbackRet >= now) {
                         found = fallbackK;
                         *landed = fallbackRet;
+                        buf.orbBestEffort = fallbackRet < horizon;
                     }
                 }
             }
             // "+k:ret o" means the press uses the intended orb and lives ret ticks.
             if (buf.explain) {
-                say("orb: touch at t{}, press now {} -> {}t |{} => {}", touch, nowUses ? "uses it" : "misses it", now,
-                    trace.empty() ? " (nothing to try)" : trace, found > 0 ? fmt::format("+{}t", found) : std::string("no pick"));
+                say("orb: touch at t{}, press now {} -> {}t ({}) |{} => {}", touch, nowUses ? "uses it" : "misses it", now,
+                    frameText(now), trace.empty() ? " (nothing to try)" : trace,
+                    found > 0 ? fmt::format("+{}t ({})", found, frameText(found)) : std::string("no pick"));
             }
         }
-        else if (touch > window && touch <= probeEnd && !groundPress && fullOnly && !shipAlign) {
+        else if (touch > window && touch <= probeEnd && (!groundPress || buf.orbAlignGround) && !shipAlign) {
             // v2.94: the orb is further ahead than the alignment window. Hold the press until a
             // tick inside it that clears the whole look-ahead - this is what used to do nothing
-            // at all (press applied to the game, orb missed, fall). Only cube-style airborne
-            // presses take this path, and only with a path that is fully safe.
+            // at all (press applied to the game, orb missed, fall).
+            // v2.95: every mode gets this now, not only cubes, and a press whose own path dies
+            // is held onto the orb even when no tick inside it clears the look-ahead (best
+            // effort) instead of being applied where it misses the orb.
             int endK = std::min({ lastTouch >= touch ? lastTouch + 1 : touch + st(6), touch + st(6), probeEnd });
             int runStart = -1, safeStart = -1, safeEnd = -1;
+            int lastResortK = 0, lastResortRet = -1;
+            int pressNow = simulate(layer, p1, p2, dual, 0, true, horizon, releaseAfter, horizon, &end);
+            buf.orbNowRet = pressNow;
             for (int k = std::max(1, touch - 1); k <= endK; ++k) {
                 if (clickMs() > buf.budgetMs) {
                     break;
@@ -2258,6 +2341,10 @@ namespace {
                 }
                 if (end == SimEnd::StopSearch) {
                     break;
+                }
+                if (uses && ret > lastResortRet) {
+                    lastResortK = k;
+                    lastResortRet = ret;
                 }
                 if (uses && ret >= horizon) {
                     if (runStart < 0) {
@@ -2277,9 +2364,17 @@ namespace {
                 *landed = horizon;
                 buf.orbWasTiming = false;
             }
+            else if (lastResortK > 0 && (pressNow < horizon || lastResortRet >= st(prediction_policy::ORB_FALLBACK_MIN_LIFE))) {
+                // v2.95: no fully-safe tick, but the orb is the click the player wanted. Use the
+                // longest-living tick that really fires it.
+                found = lastResortK;
+                *landed = lastResortRet;
+                buf.orbBestEffort = true;
+            }
             if (buf.explain) {
                 say("orb ahead at t{} (outside the {}t window): hold the press |{} => {}", touch, window,
-                    trace.empty() ? " (nothing to try)" : trace, found > 0 ? fmt::format("+{}t", found) : std::string("no pick"));
+                    trace.empty() ? " (nothing to try)" : trace,
+                    found > 0 ? fmt::format("+{}t ({})", found, frameText(found)) : std::string("no pick"));
             }
         }
         buf.orbClick = buf.assumeOrbs;
@@ -2297,8 +2392,11 @@ namespace {
     // as safe. Only crashes you couldn't have turned away from count as deaths.
     // v2.10: three turn points are tried (4, 8 and 12 ticks before the crash) instead of
     // one, so "you could have turned away" is found whenever it's true.
-    constexpr int WAVE_TURN_MARGINS[] = { 4, 8, 12 };
-    constexpr int WAVE_MIN_TURN = 6;      // a turn sooner than this after the input is too fast to count
+    // v2.95: a later turn point was added (16) and the "too fast to count" line moved down to 4
+    // ticks, so a turn that only has about a frame of room - the tight-corridor / fast spam case -
+    // is no longer thrown away as a real crash.
+    constexpr int WAVE_TURN_MARGINS[] = { 4, 8, 12, 16 };
+    constexpr int WAVE_MIN_TURN = 4;      // a turn sooner than this after the input is too fast to count
     constexpr int WAVE_ESCAPE = 16;       // the turn must then survive this many ticks
 
     // `target`: surviving this long is already good enough, so the run stops there and the
@@ -2313,8 +2411,12 @@ namespace {
         bool strict = prediction_policy::strictWaveRecovery(prediction_policy::invertedWave(p1, p2, dual), buf.waveGravityChanged);
         // Apply inverted-wave recovery rules to a predicted gravity transition too,
         // even if the real player was upright at the beginning of the prediction.
-        int minimumTurn = prediction_policy::waveMinimumTurn(strict, st(WAVE_MIN_TURN), st(12));
-        int escape = prediction_policy::waveEscape(strict, st(WAVE_ESCAPE), st(24));
+        // v2.95: inverted wave (and the upside down <-> normal transitions) keep only a small
+        // extra margin instead of double the requirement. The old 12/24 rules made a quick flip
+        // right after a gravity portal look like an unavoidable death, so tight inverted wave
+        // sections were exactly where buffering gave up.
+        int minimumTurn = prediction_policy::waveMinimumTurn(strict, st(WAVE_MIN_TURN), st(WAVE_MIN_TURN + 2));
+        int escape = prediction_policy::waveEscape(strict, st(WAVE_ESCAPE), st(WAVE_ESCAPE + 4));
         for (int margin : WAVE_TURN_MARGINS) {
             int turnAt = ret - st(margin);
             if (turnAt < minimumTurn) {
@@ -2329,6 +2431,30 @@ namespace {
                     buf.baseCrash = ret;
                 }
                 return horizon;
+            }
+        }
+        // v2.95 tight corridors: in a gap narrower than the full escape window the turned run can
+        // clear the obstacle and still be inside the corridor, so the full-escape test above says
+        // "unavoidable death". A turn a few ticks before the crash that clears a short stretch of
+        // room is something you can really do, so the run counts as safe and the search keeps the
+        // click's timing instead of delaying it wildly (or not at all).
+        if (buf.waveTight) {
+            int clearance = st(wave_rescue_policy::tightClearance(strict));
+            for (int margin : WAVE_TURN_MARGINS) {
+                int turnAt = ret - st(margin);
+                if (turnAt < st(2)) {
+                    break;
+                }
+                int length = std::min(horizon, turnAt + clearance);
+                SimEnd tightEnd;
+                int turned = simulateOrbs(layer, p1, p2, dual, delay, down, length, turnAt, length, &tightEnd);
+                if (wave_rescue_policy::tightTurnSurvives(turned, turnAt, clearance)) {
+                    if (buf.captureKiller && buf.baseEscape < 0) {
+                        buf.baseEscape = turnAt;
+                        buf.baseCrash = ret;
+                    }
+                    return horizon;
+                }
             }
         }
         return ret;
@@ -2576,6 +2702,53 @@ namespace {
             }
         }
         return ret;
+    }
+
+    // v2.95: ship search that only takes real saves. A delayed ship input changes every tick of
+    // the line after it, and the old search took the first timing that merely "moved the crash
+    // later" (or that shipScore called recoverable). That is how ship buffering flew the ship up
+    // or down into the next obstacle. Now a delay is used when its path clears the whole
+    // look-ahead, or when it is a short tap (at most 2 frames at 60 fps) whose crash genuinely
+    // moves further out - a long delay only on a full clear.
+    int searchShip(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, bool down, int horizon, int maxDelay, int base,
+        int* landed) {
+        buf.shipMarginal = false;
+        int cap = std::min(maxDelay, st(std::max(1, prediction_policy::SHIP_MAX_TAP_DELAY)));
+        int margin = st(prediction_policy::SHIP_CRASH_MARGIN);
+        int bestK = 0, bestRet = -1;
+        dbgBestK = 0;
+        dbgBestRet = -1;
+        using clock = std::chrono::steady_clock;
+        auto start = clock::now();
+        for (int k = 1; k <= maxDelay; ++k) {
+            SimEnd e;
+            int ret = simulateOrbs(layer, p1, p2, dual, k, down, horizon, -1, horizon, &e);
+            if (ret > dbgBestRet) {
+                dbgBestRet = ret;
+                dbgBestK = k;
+            }
+            if (e == SimEnd::StopSearch) {
+                break;
+            }
+            if (ret >= horizon) {
+                *landed = ret;  // clears the whole look-ahead: a real save
+                return k;
+            }
+            if (prediction_policy::shipDelayAccepted(buf.shipStraight, k, base, ret, horizon, cap, margin) && ret > bestRet) {
+                bestK = k;
+                bestRet = ret;
+            }
+            if (std::chrono::duration<double, std::milli>(clock::now() - start).count() > buf.budgetMs) {
+                say("prediction budget hit at +{} ticks", k);
+                break;
+            }
+        }
+        if (bestK > 0) {
+            buf.shipMarginal = true;
+            *landed = bestRet;
+            return bestK;
+        }
+        return 0;
     }
 
     // v2.40 UFO scoring. One flap and then nothing falls for the whole look-ahead into
@@ -2993,8 +3166,9 @@ namespace {
 
     std::string attemptSummary() {
         auto const& a = attemptStats;
-        return fmt::format("{} {} | avg {:.1f}t ({:.2f}f) early", a.saves, buf.train ? (a.saves == 1 ? "early click" : "early clicks")
-            : (a.saves == 1 ? "save" : "saves"), static_cast<double>(a.earlySum) / a.saves, a.earlySum * TICK / a.saves);
+        double avgTicks = static_cast<double>(a.earlySum) / std::max(1, a.saves);
+        return fmt::format("{} {} | avg {:.1f}t ({}) early", a.saves, buf.train ? (a.saves == 1 ? "early click" : "early clicks")
+            : (a.saves == 1 ? "save" : "saves"), avgTicks, frameText240(avgTicks));
     }
 
     // At the end of an attempt (death, restart or level complete).
@@ -3013,9 +3187,9 @@ namespace {
             return false;
         }
         noteSave(layer, ticks);
-        say("TRAIN {} {}: {}t ({:g}f) early", what, down ? "press" : "release", ticks, ticks * TICK);
+        say("TRAIN {} {}: {}t ({}) early", what, down ? "press" : "release", ticks, frameText(ticks));
         if (buf.hintLabel) {
-            buf.hintLabel->setString(fmt::format("{} {:g}f early", down ? "click" : "release", ticks * TICK).c_str());
+            buf.hintLabel->setString(fmt::format("{} {} early", down ? "click" : "release", frameText(ticks)).c_str());
             buf.hintLabel->stopAllActions();
             buf.hintLabel->setOpacity(230);
             buf.hintLabel->setScale(0.5f);
@@ -3155,8 +3329,9 @@ namespace {
             text += "No early clicks yet this session.\n";
         }
         else {
-            text += fmt::format("<cp>{}</c> {} in <cp>{}</c> attempts, on average <cp>{:.1f}t</c> ({:.2f}f) early.\n",
-                s.saves, buf.train ? "early clicks" : "saves", s.attempts, static_cast<double>(s.earlySum) / s.saves, s.earlySum * TICK / s.saves);
+            double avgTicks = static_cast<double>(s.earlySum) / std::max(1, s.saves);
+            text += fmt::format("<cp>{}</c> {} in <cp>{}</c> attempts, on average <cp>{:.1f}t</c> ({}) early.\n",
+                s.saves, buf.train ? "early clicks" : "saves", s.attempts, avgTicks, frameText240(avgTicks));
             std::vector<std::pair<int, int>> spots(s.savesAt.begin(), s.savesAt.end());
             std::sort(spots.begin(), spots.end(), [](auto const& a, auto const& b) { return a.second > b.second; });
             text += "Most early clicks at:";
@@ -3279,8 +3454,8 @@ namespace {
             return false;
         }
         noteSave(layer, extra);
-        say("SAVED queued {} +{}t ({:g}f): turn {}t after first, {}t clear", down ? "press" : "release", extra,
-            extra * TICK, foundInterval, std::max(0, foundRet - foundInterval));
+        say("SAVED queued {} +{}t ({}): turn {}t after first, {}t clear", down ? "press" : "release", extra,
+            frameText(extra), foundInterval, std::max(0, foundRet - foundInterval));
         buf.shift += extra;
         queueInput(firstIn + foundInterval, down);
         return true;
@@ -3380,6 +3555,20 @@ namespace {
             if (buf.explain) {
                 say("pass press: touching an orb (player's timing)");
             }
+            return false;
+        }
+
+        // v2.95: a press made inside an orb is never pushed behind a pending delay. The press
+        // used to be shifted by whatever delay was already waiting, which put the click outside
+        // the orb: the orb never fired and it looked like the mod skipped the orb you clicked.
+        // The waiting inputs keep their timings; this press just goes out right now.
+        buf.orbUrgent = prediction_policy::orbPressOvertakesQueue(down, touchingOrb, buf.queue.empty());
+        if (buf.orbUrgent) {
+            if (buf.explain) {
+                say("orb press: sent now ({} waiting input{} would have pushed the click past the orb)", buf.queue.size(),
+                    buf.queue.size() == 1 ? "" : "s");
+            }
+            buf.appliedInput = down;
             return false;
         }
 
@@ -3523,6 +3712,7 @@ namespace {
         // v2.78: the stage's max delay, the same for every gamemode - wave and ship no
         // longer have their own smaller caps (ship used to be clamped to 16 ticks here).
         int maxDelay = st(buf.ticksAll);
+        int orbDelayCap = -1;  // v2.95: max delay that still fires the orb the click was made in
         if (buf.lowLatency) {
             maxDelay = std::min(maxDelay, st(4));  // at most 1 frame (60 fps) of delay
         }
@@ -3584,16 +3774,17 @@ namespace {
             }
             if (k > 0) {
                 if (buf.orbWasTiming) {
-                    say("ORB timing +{}t ({:g}f): your click {}t -> {}t{}", k, k * TICK, buf.orbNowRet, orbLanded,
+                    say("ORB timing +{}t ({}): your click {}t ({}) -> {}t{}", k, frameText(k), buf.orbNowRet, frameText(buf.orbNowRet), orbLanded,
                         orbLanded >= horizon ? std::string(" (clears the look-ahead)")
                                              : fmt::format(" (your click dies at {}t, this one lives longer but still dies later)", buf.orbNowRet));
                 }
                 else if (buf.orbWasGround) {
-                    say("ORB press +{}t ({:g}f): your ground jump died at {}t, the click now lands in the orb -> {}t", k, k * TICK,
+                    say("ORB press +{}t ({}): your ground jump died at {}t, the click now lands in the orb -> {}t", k, frameText(k),
                         buf.orbNowRet, orbLanded);
                 }
                 else {
-                    say("ORB press +{}t ({:g}f) -> {}t", k, k * TICK, orbLanded);
+                    say("ORB press +{}t ({}) -> {}t ({}){}", k, frameText(k), orbLanded, frameText(orbLanded),
+                        buf.orbBestEffort ? "  (best effort: no tick inside the orb clears the look-ahead)" : "");
                 }
                 if (orbLanded >= horizon) {
                     noteSave(layer, k);
@@ -3606,10 +3797,36 @@ namespace {
             if (orbRetime || buf.orbWasTiming) {
                 // v2.86: no tick inside the orb is a real save over the click you just made, so
                 // the press reaches the game exactly as before (your timing, no safety veto).
-                buf.appliedInput = down;
-                if (buf.explain) {
-                    say("orb timing: no tick inside the orb lives longer than your click ({}t)", buf.orbNowRet);
+                // v2.95: only when your click actually survives. A click that dies inside the
+                // look-ahead with nothing better inside the orb used to be passed through with a
+                // "nothing beats your click" line and led straight into the crash. It now falls
+                // through to the normal search, which can still delay the press (best-effort and
+                // late-crash rules included), and the log says so instead of calling it best.
+                if (prediction_policy::orbClickBeatsAll(!buf.orbNowDies, false)) {
+                    buf.appliedInput = down;
+                    if (buf.explain) {
+                        say("orb timing: your click survives the {}t ({}) look-ahead, its timing is kept", horizon, frameText(horizon));
+                    }
+                    return false;
                 }
+                if (buf.explain) {
+                    say("orb timing: your click dies at {}t ({}) and no tick inside the orb lives longer - searching a save instead of calling it best",
+                        buf.orbNowRet, frameText(buf.orbNowRet));
+                }
+                // The search may only use ticks at which the press still fires the orb; a delay
+                // that lands the press after you left the orb would skip the orb all over again.
+                orbDelayCap = std::max(0, buf.lastOrbTick - 1);
+            }
+        }
+        if (orbDelayCap >= 0) {
+            maxDelay = std::min(maxDelay, orbDelayCap);
+            if (maxDelay <= 0) {
+                // v2.95: the press is about to leave the orb, so no delay can both save it and
+                // still fire the orb. Leave the player's click (and the orb) exactly as it is.
+                if (buf.explain) {
+                    say("orb timing: no tick left inside the orb to delay into, the click stays where it is");
+                }
+                buf.appliedInput = down;
                 return false;
             }
         }
@@ -3758,8 +3975,10 @@ namespace {
                 }
                 if (bestK > 0 && !buf.train) {
                     noteSave(layer, bestK);
-                    say("MORE TIME {}{} +{}t: crash t{} -> {} (died here {}x)", down ? "press" : "release", tickTag, bestK, crash0,
-                        bestCrash < 0 ? std::string("none") : fmt::format("t{}", bestCrash), spotAround(sliceOf(p1)).deaths);
+                    say("MORE TIME {}{} +{}t ({}): crash t{} ({}) -> {} (died here {}x)", down ? "press" : "release", tickTag, bestK,
+                        frameText(bestK), crash0, frameText(crash0),
+                        bestCrash < 0 ? std::string("none") : fmt::format("t{} ({})", bestCrash, frameText(bestCrash)),
+                        spotAround(sliceOf(p1)).deaths);
                     decided(layer, p1, p2, dual, bestK, down, horizon, releaseAfter);
                     buf.shift = bestK;
                     queueInput(bestK - early, down);
@@ -3768,11 +3987,12 @@ namespace {
             }
             if (buf.explain) {
                 if (buf.baseEscape >= 0) {
-                    say("pass {}{}: safe only if you react by t{} (else crash at t{}){}", down ? "press" : "release", tickTag,
-                        buf.baseEscape, buf.baseCrash, baseOrbs > 0 ? fmt::format(" - {} orb{} assumed clicked", baseOrbs, baseOrbs == 1 ? "" : "s") : "");
+                    say("pass {}{}: safe only if you react by t{} ({}), else crash at t{} ({}){}", down ? "press" : "release", tickTag,
+                        buf.baseEscape, frameText(buf.baseEscape), buf.baseCrash, frameText(buf.baseCrash), baseOrbs > 0 ? fmt::format(" - {} orb{} assumed clicked", baseOrbs, baseOrbs == 1 ? "" : "s") : "");
                 }
                 else {
-                    say("pass {}{}: safe now (survives the {}t look-ahead{}{})", down ? "press" : "release", tickTag, horizon,
+                    say("pass {}{}: safe now (survives the {}t / {} look-ahead{}{})", down ? "press" : "release", tickTag, horizon,
+                        frameText(horizon),
                         baseOrbs > 0 ? fmt::format(", the ghost clicked {} orb{} for you", baseOrbs, baseOrbs == 1 ? "" : "s") : "",
                         baseHarmless > 0 ? fmt::format(", ignoring {} hazard{} you are touching", baseHarmless, baseHarmless == 1 ? "" : "s") : "");
                 }
@@ -3861,9 +4081,7 @@ namespace {
                   : ballPress     ? searchTwoPass(horizon, maxDelay, base, &landed, [&](int k, int target, SimEnd* e) {
                         return ballScore(layer, p1, p2, dual, k, horizon, releaseAfter, target, e);
                     }, true)
-                  : shipInput     ? searchSmallest(horizon, maxDelay, base, &landed, [&](int k, int target, SimEnd* e) {
-                        return shipScore(layer, p1, p2, dual, k, down, horizon, target, e);
-                    }, -1.0, false, true)
+                  : shipInput     ? searchShip(layer, p1, p2, dual, down, horizon, maxDelay, base, &landed)
                   : ufoPress      ? searchTwoPass(horizon, maxDelay, base, &landed, [&](int k, int target, SimEnd* e) {
                         return ufoScore(layer, p1, p2, dual, k, horizon, releaseAfter, target, e);
                     }, true)
@@ -3881,24 +4099,29 @@ namespace {
         // whole look-ahead, and wave used to pass the click through untouched even when a
         // timing lived several frames longer - the "frame perfect clicks do not work" case.
         // Wave uses a shorter line than the cube's 90 ticks - a wave lives one look-ahead
-        // at most, so 90 would make the rule dead code. It still has to buy 4 frames over pressing
-        // now and live 2 frames past the late-crash line, and it never applies to v4.6 rules.
-        int lateLine = anyWave ? std::min(st(buf.lateCrash), st(24)) : st(buf.lateCrash);
+        // at most, so 90 would make the rule dead code. It has to buy 3 frames over pressing now
+        // and live 5 frames past the late-crash line, and it never applies to v4.6 rules.
+        // v2.95: wave's line is 20 ticks (5 frames) instead of 24 and the crash only has to move
+        // 12 ticks (3 frames) further out, so a tight corridor that no timing fully clears still
+        // gets the timing that lives longest instead of the click being passed through untouched.
+        int lateLine = anyWave ? std::min(st(buf.lateCrash), st(20)) : st(buf.lateCrash);
         if (saved <= 0 && !(anyWave && buf.waveV46) && buf.lateCrash > 0 && lateLine > 0 && dbgBestK > 0 && dbgBestRet > 0) {
             int crashAt = dbgBestK + dbgBestRet;
-            if (dbgBestRet >= lateLine && crashAt >= base + st(anyWave ? 16 : 12)) {
+            if (dbgBestRet >= lateLine && crashAt >= base + st(12)) {
                 saved = dbgBestK;
                 landed = dbgBestRet;
                 lateSave = true;
                 if (buf.explain) {
-                    say("late save: nothing clears the {}t look-ahead, +{}t survives {}t and crashes at t{} ({}t later than pressing now, past "
-                        "the {}t late-crash line)", horizon, saved, landed, crashAt, crashAt - base, lateLine);
+                    say("late save: nothing clears the {}t ({}) look-ahead, +{}t survives {}t ({}) and crashes at t{} ({}t later than pressing now, "
+                        "past the {}t late-crash line)", horizon, frameText(horizon), saved, landed, frameText(landed), crashAt, crashAt - base, lateLine);
                 }
             }
         }
         if (saved <= 0) {
-            say("no save: {}{} dies in {}t (max {}t, best +{}t -> {}t of {}){}", down ? "press" : "release", tickTag, base, maxDelay,
-                dbgBestK, dbgBestRet, horizon, !crashFixed ? "" : base < st(30) ? " - too late: waiting only makes it crash sooner" : " - same crash at any timing (next obstacle)");
+            say("no save: {}{} dies in {}t ({}), max {}t ({}); best +{}t lives {}t ({}) of the {}t ({}) look-ahead{}",
+                down ? "press" : "release", tickTag, base, frameText(base), maxDelay, frameText(maxDelay), dbgBestK, dbgBestRet,
+                frameText(dbgBestRet), horizon, frameText(horizon),
+                !crashFixed ? "" : base < st(30) ? " - too late: waiting only makes it crash sooner" : " - same crash at any timing (next obstacle)");
             decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
             buf.appliedInput = down;
             return false;
@@ -3979,11 +4202,15 @@ namespace {
             releaseAfter = robotUsedHold;  // the path view / drift check show the hold that works
         }
         noteSave(layer, saved);
-        say("SAVED {}{} +{}t ({:g}f)  {}->{}  [max {}]{}", down ? "press" : "release", tickTag, saved, saved * TICK, base, landed, maxDelay,
+        say("SAVED {}{} +{}t ({}): yours {} -> now {}{}  [max {}t]{}", down ? "press" : "release", tickTag, saved, frameText(saved),
+            base >= horizon ? "clears the look-ahead" : fmt::format("dies at {}t ({})", base, frameText(base)),
+            landed >= horizon ? "clears the look-ahead" : fmt::format("dies at {}t ({})", landed, frameText(landed)),
+            buf.orbBestEffort ? "  (orb click, best effort)" : "", maxDelay,
             lateSave ? fmt::format("  (best effort, crash t{})", landed)
             : robustNote ? std::string("  (robust)")
             : fromMemory ? std::string("  (memory)")
             : cubeStyleWave && marginUsed ? std::string("  +margin")
+            : shipInput && buf.shipMarginal ? std::string("  (short tap, crash moves later)")
             : robotPress ? fmt::format("  hold {}t", robotUsedHold) : std::string());
         decided(layer, p1, p2, dual, saved, down, horizon, releaseAfter);
         buf.shift = saved;

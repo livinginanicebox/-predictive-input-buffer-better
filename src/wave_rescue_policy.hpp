@@ -43,4 +43,17 @@ namespace wave_rescue_policy {
     constexpr bool clearsNextTurn(bool turnFired, int survived, int interval, int clearance) {
         return turnFired && survived >= interval + clearance;
     }
+
+    // v2.95 tight corridors. The turn-away check used to demand the whole escape window after
+    // the turn (16 ticks, 24 inverted). In a corridor narrower than that the turned run clears
+    // the obstacle and is simply still inside the corridor, so the old rule called a perfectly
+    // reactable crash a death. A turn a couple of ticks before the crash that clears this much
+    // room now counts too, which is what makes frame-perfect wave spam through tight gaps work.
+    constexpr int tightClearance(bool inverted) {
+        return inverted ? 8 : 6;
+    }
+
+    constexpr bool tightTurnSurvives(int survived, int turnAt, int clearance) {
+        return survived >= turnAt + clearance;
+    }
 }

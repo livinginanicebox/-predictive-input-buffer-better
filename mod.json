@@ -3,7 +3,7 @@
 	"gd": {
 		"win": "2.2081"
 	},
-	"version": "v2.94.0",
+	"version": "v2.95.0",
 	"id": "basu.input-buffer",
 	"name": "Click Before Frames",
 	"developer": "BASU",
@@ -139,6 +139,12 @@
 			"description": "When a wave save is found, use a delay with one tick of room on both sides instead of the one that only just clears the spike, so tiny differences in the real run can't clip it. Can add 1 tick (0.25f) to some saves. v2.94: wave also gets the best-effort save (the setting below): when no timing clears the look-ahead, the timing that lives longest is still used if it buys 3 frames over pressing now and dies past the late-crash line. On Tidal Wave style spam, where nothing is ever fully clear, that is the difference between a click that is buffered and one that is not.",
 			"default": true
 		},
+		"wave-tight": {
+			"type": "bool",
+			"name": "Wave: tight corridors",
+			"description": "v2.95: makes fast wave spam work in gaps narrower than the old escape window. A turn a few ticks before a crash that clears even a short stretch of room counts as 'you could have turned away' (6 ticks, 8 inverted) instead of an unavoidable death, a turn may come as late as 4 ticks before the crash, and inverted wave / post-portal turns only need a small extra margin (the old double requirement made upside-down <-> normal transitions the hardest part to buffer). Off: the old stricter rules.",
+			"default": true
+		},
 		"orb-align-ground": {
 			"type": "bool",
 			"name": "Orb alignment: also from the ground",
@@ -196,13 +202,13 @@
 		"ship-buffer": {
 			"type": "bool",
 			"name": "Ship: buffer inputs",
-			"description": "Buffer ship presses and releases, with the same max delay (F6 stage) as every other gamemode. v2.94: ship is the easiest mode to buffer again. Fast ship taps are NEVER treated as spam (that guard used to pass 3 fast taps in a row straight to the game - the flick you buffered never reached the buffer), and a tap that already survives the look-ahead is left exactly where it is instead of being re-searched for a \"safer spot\", so straight-fly feathering keeps its line. The straight-fly band was 48 units (1.6 blocks) - ordinary feather recovery read as wobbly and got retimed, which is what made the ship feel uncontrollable; it is now 90 units (180 mini). Ship orb clicks are buffered like cube ones: an early press is held onto the orb, a click inside an orb is retimed within it, and both need a path that clears the whole look-ahead. A crash still only counts if the opposite input 8 / 16 / 24 ticks before it cannot recover. Repeated alternating feather taps are recognised as straight-flying and never bypassed. Off = ship is never touched.",
+			"description": "Buffer ship presses and releases, with the same max delay (F6 stage) as every other gamemode. v2.94: ship is the easiest mode to buffer again. Fast ship taps are NEVER treated as spam (that guard used to pass 3 fast taps in a row straight to the game - the flick you buffered never reached the buffer), and a tap that already survives the look-ahead is left exactly where it is instead of being re-searched for a \"safer spot\", so straight-fly feathering keeps its line. The straight-fly band was 48 units (1.6 blocks) - ordinary feather recovery read as wobbly and got retimed, which is what made the ship feel uncontrollable; it is now 90 units (180 mini). Ship orb clicks are buffered like cube ones: an early press is held onto the orb, a click inside an orb is retimed within it, and both need a path that clears the whole look-ahead. A crash still only counts if the opposite input 8 / 16 / 24 ticks before it cannot recover. Repeated alternating feather taps are recognised as straight-flying and never bypassed. Off = ship is never touched. v2.95: ship buffering only takes real saves now. A delayed ship input changes the whole line after it, so a delay is used only when its path clears the whole look-ahead, or when it is a short tap (at most 8 ticks / 2 frames) whose crash genuinely moves further out (at least 12 ticks later); straight-fly rhythms never take a marginal retime. The search scores the raw simulated ship path instead of the \"you could have recovered\" excuse, which is what used to fly the ship up or down into the next obstacle.",
 			"default": true
 		},
 		"orb-timing": {
 			"type": "bool",
 			"name": "Orb timing",
-			"description": "For frame-perfect orbs, retry timings while passing through the same orb. v2.94: covers ship orb clicks too. A press made while already inside an orb counts as safe only if it also survives with you half a tick ahead of and behind (see 'Robust saves'). Otherwise every tick of the pass through the same orb is tried: a tick that clears the look-ahead wins, and when your click does not clear it any tick that lives longer is used as well. An early press in front of an orb that has nothing above or below it is still held onto the orb (the orb path has to live past the late-crash line), instead of being applied where it misses the orb - that was the \"some orbs are just skipped\" case. It never picks the last tick you are still touching the orb on. Needs 'Orb alignment' and 'Orb / pad / portal prediction'.",
+			"description": "For frame-perfect orbs, retry timings while passing through the same orb. v2.94: covers ship orb clicks too. A press made while already inside an orb counts as safe only if it also survives with you half a tick ahead of and behind (see 'Robust saves'). Otherwise every tick of the pass through the same orb is tried: a tick that clears the look-ahead wins, and when your click does not clear it any tick that lives longer is used as well. An early press in front of an orb that has nothing above or below it is still held onto the orb (the orb path has to live past the late-crash line), instead of being applied where it misses the orb - that was the \"some orbs are just skipped\" case. It never picks the last tick you are still touching the orb on. Needs 'Orb alignment' and 'Orb / pad / portal prediction'. v2.95: a dying orb click is never called \"the best click\". When your click dies inside the look-ahead and no tick inside the orb lives longer, the press goes to the normal search (late-crash / best-effort rules included) and the search may only use delays that still fire the same orb, so the orb is never skipped. A press made inside an orb is also never pushed behind a pending delay (that put the click outside the orb), and a press in front of an orb is held onto it whenever the click really fires it.",
 			"default": true
 		},
 		"cube-late-crash": {
