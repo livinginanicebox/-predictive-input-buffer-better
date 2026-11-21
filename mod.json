@@ -3,7 +3,7 @@
 	"gd": {
 		"win": "2.2081"
 	},
-	"version": "v2.96.0",
+	"version": "v2.97.0",
 	"id": "basu.input-buffer",
 	"name": "Click Before Frames",
 	"developer": "BASU",
@@ -88,7 +88,7 @@
 		"wave-auto-release": {
 			"type": "bool",
 			"name": "Wave auto-release",
-			"description": "While you hold in wave, if holding would crash within the window below and letting go clearly survives, the mod lets go for you. Your own release is then ignored. Practice mode only, unless 'Auto-release in normal runs' is on.",
+			"description": "While you hold in wave, if holding would crash within the window below and letting go clearly survives, the mod lets go for you. Your own release is then ignored. Practice mode only, unless 'Auto-release in normal runs' is on. v2.97: see \"Wave: let go early into a spike\", which releases a couple of frames earlier and also works with this setting off.",
 			"default": false
 		},
 		"auto-release-window": {
@@ -143,6 +143,18 @@
 			"type": "bool",
 			"name": "Wave: tight corridors",
 			"description": "v2.95: makes fast wave spam work in gaps narrower than the old escape window. A turn a few ticks before a crash that clears even a short stretch of room counts as 'you could have turned away' (6 ticks, 8 inverted) instead of an unavoidable death, a turn may come as late as 4 ticks before the crash, and inverted wave / post-portal turns only need a small extra margin (the old double requirement made upside-down <-> normal transitions the hardest part to buffer). Off: the old stricter rules.",
+			"default": true
+		},
+		"wave-clean-timing": {
+			"type": "bool",
+			"name": "Wave: clear on its own, not on a guessed turn",
+			"description": "v2.97: a wave run used to count as 'cleared' the moment a turn a few ticks before the crash would save it - so the search picked the earliest timing that only works if you click again a few ticks before the spike. That is the timing that makes wave parts harder: the wave flies at the obstacle and one or two frames of real timing error puts it inside. With this on, the buffer prefers a timing whose run survives the whole look-ahead by itself (a clean clear), and gives it a tick of room on both sides; a timing that needs an assumed turn is only used when no clean one exists inside about a frame of it. Off: the old first-timing-that-counts rule.",
+			"default": true
+		},
+		"wave-early-release": {
+			"type": "bool",
+			"name": "Wave: let go early into a spike",
+			"description": "v2.97: while you hold in wave, the mod looks a couple of frames ahead (release window at least 8 ticks) and lets go as soon as the held trajectory is heading into a spike. Letting go is accepted when the release clears the look-ahead, or when it lives clearly longer than holding would (4+ ticks) - before, a release that still ended later was rejected, so the mod sat and waited for your click and the wave carried straight into the spike. Practice mode only, like every auto-release. This also enables wave auto-release on its own; turn it off to go back to auto-release strictly under its own setting.",
 			"default": true
 		},
 		"orb-align-ground": {

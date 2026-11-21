@@ -1,4 +1,4 @@
-// Click Before Frames v2.96 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
+// Click Before Frames v2.97 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
 // ahead with your input. If the ghost dies, the input is retried with 1..N ticks of
@@ -258,6 +258,8 @@ namespace {
         bool waveMargin = true;      // v2.10: center wave saves in the safe window (1 tick of room)
         bool waveV46 = false;        // v2.7: use the old v4.6 wave rules instead of the cube-style ones
         bool waveTight = true;       // v2.95: tight corridors count as turn-away saves (fast spam)
+        bool waveCleanTiming = true; // v2.97: prefer wave timings that clear without an assumed turn
+        bool waveEarlyRelease = true;// v2.97: let go a few frames before a wave spike
         bool shipMarginal = false;   // v2.95: the ship save is a short tap whose crash moves later
         bool orbAlign = true;        // v2.6: hold an early press back until the ghost is inside the orb
         bool orbAlignGround = false; // v2.11.1: also align presses made on the ground (jumps)
@@ -591,6 +593,8 @@ namespace {
         buf.autoNormalRuns = mod->getSettingValue<bool>("auto-release-normal-runs");
         buf.waveV46 = mod->getSettingValue<bool>("wave-v46");
         buf.waveTight = mod->getSettingValue<bool>("wave-tight");  // v2.95
+        buf.waveCleanTiming = mod->getSettingValue<bool>("wave-clean-timing");  // v2.97
+        buf.waveEarlyRelease = mod->getSettingValue<bool>("wave-early-release");  // v2.97
         buf.waveMargin = mod->getSettingValue<bool>("wave-safety-margin") && !buf.lowLatency;
         buf.orbWindow = static_cast<int>(mod->getSettingValue<int64_t>("orb-align-ticks"));
         // v2.71 performance mode: for PCs that drop frames on clicks. Shorter searches, no
@@ -667,8 +671,9 @@ namespace {
             buf.smart, buf.fullState, buf.robustSaves, buf.lateCrash, buf.practiceOnly);
         text += fmt::format("orbs: align {} (ground {}, {}t) timing {} sub-frame {} assume {} both {} | memory {} ({} spots)\n", buf.orbAlign,
             buf.orbAlignGround, buf.orbWindow, buf.orbTiming, buf.subFrameOrbs, buf.assumeOrbs, buf.tryBothOrbs, buf.learn, memorySpots());
-        text += fmt::format("wave: v4.6 {} margin {} tight corridors {} horizon {} spam gap {} | robot smart {} | spider smart {} | ship {} (same max delay as every mode)\n",
-            buf.waveV46, buf.waveMargin, buf.waveTight, buf.waveHorizon, buf.spamGap, buf.robotSmart, buf.spiderSmart, buf.shipBuffer);
+        text += fmt::format("wave: v4.6 {} margin {} tight corridors {} clean timing {} early release {} horizon {} spam gap {} | robot smart {} | spider smart {} | ship {} (same max delay as every mode)\n",
+            buf.waveV46, buf.waveMargin, buf.waveTight, buf.waveCleanTiming, buf.waveEarlyRelease, buf.waveHorizon, buf.spamGap,
+            buf.robotSmart, buf.spiderSmart, buf.shipBuffer);
         text += fmt::format("auto-release: wave {} robot {} dash {} normal runs {} window {} | movers: avoid {} predict {}\n",
             buf.autoRelease, buf.robotAutoRelease, buf.dashAutoRelease, buf.autoNormalRuns, buf.autoWindow, buf.avoidMovers,
             buf.predictMovers);
@@ -2409,6 +2414,9 @@ namespace {
     // v2.1: best delayed run seen by the last search (shown in the "no save" log line)
     int dbgBestK = 0;
     int dbgBestRet = -1;
+    // v2.97: true when the last waveScore run was only saved by the turn-away checks (a turn a
+    // few ticks before the crash was assumed), not by surviving the look-ahead on its own.
+    bool waveRescued = false;
 
     // v2.7 wave scoring, the wave version of the cube's "landed safely". A wave never
     // lands, so a run that keeps going one way eventually hits a wall even in a normal
@@ -2430,6 +2438,7 @@ namespace {
         SimEnd* end) {
         PortalSafetyGuard portalSafetyGuard;
         int ret = simulateOrbs(layer, p1, p2, dual, delay, down, horizon, -1, target, end);
+        waveRescued = false;  // v2.97: this run survives on its own
         if (ret >= target || *end == SimEnd::StopSearch) {
             return ret;
         }
@@ -2455,6 +2464,7 @@ namespace {
                     buf.baseEscape = turnAt;
                     buf.baseCrash = ret;
                 }
+                waveRescued = true;  // v2.97: cleared only because a turn was assumed
                 return horizon;
             }
         }
@@ -2478,6 +2488,7 @@ namespace {
                         buf.baseEscape = turnAt;
                         buf.baseCrash = ret;
                     }
+                    waveRescued = true;  // v2.97: cleared only because a turn was assumed
                     return horizon;
                 }
             }
@@ -2827,7 +2838,14 @@ namespace {
         int target = horizon;
         dbgBestK = 0;
         dbgBestRet = -1;
-        for (int k = 1; k <= maxDelay; ++k) {
+        // v2.97: the first timing that merely "counts as cleared" is usually one that only lives
+        // because a turn a few ticks before the crash was assumed - the wave then flies at the
+        // obstacle and bets on your next click, which is what made wave parts harder. Prefer a
+        // timing whose run survives the look-ahead on its own (a clean clear), and give it a tick
+        // of room on both sides. A rescued timing is only used when no clean one exists.
+        int cleanK = 0, cleanLast = 0, rescuedK = 0;
+        int stopAt = maxDelay;  // how far to keep scanning once something safe was found
+        for (int k = 1; k <= maxDelay && k <= stopAt; ++k) {
             SimEnd end;
             int ret = waveScore(layer, p1, p2, dual, k, down, horizon, target, &end);
             if (ret > dbgBestRet) {
@@ -2837,28 +2855,61 @@ namespace {
             if (end == SimEnd::StopSearch) {
                 return 0;
             }
+            bool clean = ret >= target && !waveRescued;
             if (ret >= target) {
-                *landed = ret;
-                // v2.10 safety margin: the first safe delay is the one that only just clears
-                // the spike corner, so a pixel of difference in the real run can still clip
-                // it. If the next two delays are safe too, take the middle one: a tick of
-                // room on both sides.
-                if (buf.waveMargin && k + 2 <= maxDelay) {
-                    SimEnd e1, e2;
-                    if (waveScore(layer, p1, p2, dual, k + 1, down, horizon, target, &e1) >= target &&
-                        waveScore(layer, p1, p2, dual, k + 2, down, horizon, target, &e2) >= target) {
-                        marginUsed = true;
-                        return k + 1;
+                if (!buf.waveCleanTiming) {
+                    // old rule: the first safe delay wins (below), with the v2.10 margin probe
+                    if (!cleanK && !rescuedK) {
+                        stopAt = k;
+                        cleanK = clean ? k : 0;
+                        rescuedK = clean ? 0 : k;
+                        cleanLast = clean ? k : 0;
                     }
                 }
-                return k;
+                else if (clean) {
+                    if (!cleanK) {
+                        cleanK = k;
+                        cleanLast = k;
+                        stopAt = std::min(maxDelay, k + wave_rescue_policy::cleanSearchSlack(st(4)));
+                    }
+                    else {
+                        cleanLast = k;
+                    }
+                }
+                else if (!cleanK && !rescuedK) {
+                    rescuedK = k;
+                    // keep looking for a clean timing just past it, while the budget allows
+                    stopAt = std::min(maxDelay, k + wave_rescue_policy::cleanSearchSlack(st(4)));
+                }
             }
             if (std::chrono::duration<double, std::milli>(clock::now() - start).count() > buf.budgetMs) {
                 say("prediction budget hit at +{} ticks", k);
-                return 0;
+                break;
             }
         }
-        return 0;
+        int pick = cleanK ? cleanK : rescuedK;
+        if (pick <= 0) {
+            return 0;
+        }
+        *landed = horizon;
+        if (buf.waveMargin) {
+            if (cleanK && buf.waveCleanTiming) {
+                if (wave_rescue_policy::hasSlack(cleanK, cleanLast)) {
+                    marginUsed = true;
+                    return cleanK + 1;  // a tick of room on both sides
+                }
+            }
+            else if (pick + 2 <= maxDelay) {
+                // rescued timing: the old v2.10 probe, so a wave save still has room around it
+                SimEnd e1, e2;
+                if (waveScore(layer, p1, p2, dual, pick + 1, down, horizon, target, &e1) >= target &&
+                    waveScore(layer, p1, p2, dual, pick + 2, down, horizon, target, &e2) >= target) {
+                    marginUsed = true;
+                    return pick + 1;
+                }
+            }
+        }
+        return pick;
     }
 
     // Find the smallest delay that clearly beats pressing now. 0 = don't buffer.
@@ -4289,6 +4340,10 @@ namespace {
     // tick whether holding crashes within the next `autoWindow` ticks. If it does and
     // letting go now clearly survives longer, let go for you. Your own release later is
     // swallowed, and your next press works as normal.
+    // v2.97: in wave this no longer waits for you to click. The hold is checked a couple of
+    // frames further ahead, and letting go counts when the release lives clearly longer than
+    // holding even if it still ends later - a spike a few frames away is turned away before the
+    // wave's trajectory carries into it, instead of the mod assuming your next click saves it.
     void tryAutoRelease(PlayLayer* layer, PlayerObject* p1) {
         if ((!buf.autoRelease && !buf.robotAutoRelease && !buf.dashAutoRelease) || buf.autoReleased || layer->m_isPlatformer) {
             return;
@@ -4307,12 +4362,22 @@ namespace {
         bool dash = p1->m_isDashing || (p2 && p2->m_isDashing);
         bool wave = !dash && (p1->m_isDart || (p2 && p2->m_isDart));
         bool robot = !dash && !wave && (p1->m_isRobot || (p2 && p2->m_isRobot));
-        if (p1->m_isDead || !((dash && buf.dashAutoRelease) || (wave && buf.autoRelease) || (robot && buf.robotAutoRelease))) {
+        // v2.97: wave early release is its own thing, so it works with the auto-release setting
+        // off - the whole point is that the wave turns before it reaches the spike, not that you
+        // have to find the release yourself.
+        bool waveAuto = wave && (buf.autoRelease || buf.waveEarlyRelease);
+        if (p1->m_isDead || !((dash && buf.dashAutoRelease) || waveAuto || (robot && buf.robotAutoRelease))) {
             return;
         }
         bool mini = (p1->m_isDart && p1->m_vehicleSize < 1.f) || (p2 && p2->m_isDart && p2->m_vehicleSize < 1.f);
 
         int window = st(std::clamp(buf.autoWindow, 2, 24));
+        // v2.97: a wave needs a couple of frames of lead to turn out of a spike's path, so the
+        // release is checked that far ahead instead of a frame and a half. Holding only reads as
+        // "into the spike" once the held run dies inside this window.
+        if (wave && buf.waveEarlyRelease) {
+            window = wave_rescue_policy::releaseLead(window, st(8));
+        }
         buf.sawMover = false;
         buf.skipPress = true;
         buf.orbClick = buf.assumeOrbs;
@@ -4331,7 +4396,11 @@ namespace {
         buf.trackMovers = buf.avoidMovers;
         int release = simulateOrbs(layer, p1, p2, dual, 0, false, horizon, -1, horizon, &end);
         buf.trackMovers = false;
-        if (release < horizon && release < hold + st(10)) {
+        // v2.97: letting go is accepted when it clears the look-ahead, or - with early release in
+        // wave - when it lives clearly longer than holding would. Waiting for the player's own
+        // click there is exactly what let the wave's trajectory carry into the spike, because the
+        // turn only starts when the release is actually sent.
+        if (!wave_rescue_policy::releaseWins(wave && buf.waveEarlyRelease, release, hold, horizon, st(4))) {
             return;
         }
         if (buf.avoidMovers && buf.sawMover) {
@@ -4340,7 +4409,13 @@ namespace {
         buf.autoReleased = true;
         buf.autoDash = dash;
         sendButton(layer, false);
-        say("AUTO release{}: holding dies in {}t, letting go lives {}t", dash ? " (dash)" : (robot ? " (robot)" : ""), hold, release);
+        if (wave && buf.waveEarlyRelease && hold < window && release < horizon) {
+            say("AUTO release (wave, early): spike in {}t ({}), letting go now - it lives {}t ({}) instead of {}t",
+                hold, frameText(hold), release, frameText(release), hold);
+        }
+        else {
+            say("AUTO release{}: holding dies in {}t, letting go lives {}t", dash ? " (dash)" : (robot ? " (robot)" : ""), hold, release);
+        }
     }
 
     void deliverPending(PlayLayer* layer, PlayerObject* player) {

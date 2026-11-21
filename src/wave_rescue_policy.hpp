@@ -56,4 +56,41 @@ namespace wave_rescue_policy {
     constexpr bool tightTurnSurvives(int survived, int turnAt, int clearance) {
         return survived >= turnAt + clearance;
     }
+
+    // v2.97 wave slack. A wave run that only "survives" because a turn a few ticks before the
+    // crash was assumed is a run that flies straight at the obstacle and bets on your next click.
+    // Picking that timing (the first one that counts as cleared) is what made wave sections
+    // harder: one or two frames of human timing error and the wave is inside the spike. A clean
+    // clear is a run that survives the look-ahead on its own, with no assumed turn.
+    constexpr bool cleanClear(int survived, int target) {
+        return survived >= target;
+    }
+
+    // How far past the first rescued timing the search keeps looking for a clean one. Small on
+    // purpose: the player is waiting for the input, and a clean timing inside a frame of the
+    // rescued one is already a real improvement.
+    constexpr int cleanSearchSlack(int ticksPerFrame) {
+        return std::max(1, ticksPerFrame);
+    }
+
+    // One more tick of room around a clean run, so a tick of real-life difference on either
+    // side still clears the same obstacle.
+    constexpr bool hasSlack(int firstClean, int lastClean) {
+        return lastClean > firstClean;
+    }
+
+    // v2.97 early release. Holding in wave only reads as "a spike in a few frames" once the held
+    // run dies inside the release window, and letting go has to be accepted there even when the
+    // release still ends later - waiting for the player's own click is exactly what sent the
+    // wave into the spike. `lead` is the wave release window (a couple of frames ahead).
+    constexpr int releaseLead(int window, int waveLead) {
+        return std::max(window, waveLead);
+    }
+
+    constexpr bool releaseWins(bool relaxed, int release, int hold, int horizon, int minGain) {
+        if (release >= horizon) {
+            return true;
+        }
+        return relaxed && release >= hold + minGain;
+    }
 }
