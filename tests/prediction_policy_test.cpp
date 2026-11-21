@@ -106,5 +106,35 @@ int main2() {
     assert(shipDelayAccepted(false, 40, 20, 30, horizon, SHIP_MAX_TAP_DELAY, SHIP_CRASH_MARGIN) == false);
     assert(shipDelayAccepted(false, 40, 20, horizon, horizon, SHIP_MAX_TAP_DELAY, SHIP_CRASH_MARGIN)); // full clear, any delay
     assert(SHIP_MAX_TAP_DELAY <= 12);  // at most a few frames, never a big retime
+
+    // v2.96 sub-frame orb timings (CBF). 4 ticks = 1 frame at 60 fps / 240 steps.
+    assert(subFrameWindow(10, 10, 4));   // one-tick orb window
+    assert(subFrameWindow(10, 13, 4));   // three ticks, still under a frame
+    assert(!subFrameWindow(10, 14, 4));  // a full frame is not sub-frame any more
+    assert(!subFrameWindow(-1, 3, 4));   // no orb found
+    assert(!subFrameWindow(10, 9, 4));   // bad window
+    assert(subFrameWindow(10, 10, 0));   // a bogus frame length still means "tiny"
+    // A quarter tick of slack inside a sub-frame window instead of half a tick.
+    assert(orbSafetyShift(0.6f, true) < 0.6f);
+    assert(orbSafetyShift(0.6f, true) >= 0.15f);
+    assert(orbSafetyShift(0.6f, false) == 0.6f);
+    // The last tick inside a sub-frame orb is usable when the CBF click sits inside its tick.
+    assert(lastOrbTickUsable(true, true, 0.43f));
+    assert(!lastOrbTickUsable(false, true, 0.43f));
+    assert(!lastOrbTickUsable(true, false, 0.43f));
+    assert(!lastOrbTickUsable(true, true, 0.0f));
+    assert(!lastOrbTickUsable(true, true, 0.99f));
+    // A sub-tick click keeps the position the prediction used instead of being re-searched.
+    assert(keepSubTickClick(true, true, true));
+    assert(!keepSubTickClick(true, true, false));
+    assert(!keepSubTickClick(false, true, true));
+    assert(!keepSubTickClick(true, false, true));
+    // 0.43 of a tick is 0.11 frames at 240 steps/s.
+    assert(std::abs(framesFromTicks(0.43, 1.0 / 240.0) - 0.1075) < 1e-9);
+    // v2.96 UFO orb presses are scored on their own path (no "you could reflap" excuse).
+    assert(pressUsedOrb(0, 2));
+    assert(pressUsedOrb(2, 2));
+    assert(!pressUsedOrb(3, 2));
+    assert(!pressUsedOrb(-1, 2));
     return 0;
 }

@@ -3,7 +3,7 @@
 	"gd": {
 		"win": "2.2081"
 	},
-	"version": "v2.95.0",
+	"version": "v2.96.0",
 	"id": "basu.input-buffer",
 	"name": "Click Before Frames",
 	"developer": "BASU",
@@ -208,7 +208,13 @@
 		"orb-timing": {
 			"type": "bool",
 			"name": "Orb timing",
-			"description": "For frame-perfect orbs, retry timings while passing through the same orb. v2.94: covers ship orb clicks too. A press made while already inside an orb counts as safe only if it also survives with you half a tick ahead of and behind (see 'Robust saves'). Otherwise every tick of the pass through the same orb is tried: a tick that clears the look-ahead wins, and when your click does not clear it any tick that lives longer is used as well. An early press in front of an orb that has nothing above or below it is still held onto the orb (the orb path has to live past the late-crash line), instead of being applied where it misses the orb - that was the \"some orbs are just skipped\" case. It never picks the last tick you are still touching the orb on. Needs 'Orb alignment' and 'Orb / pad / portal prediction'. v2.95: a dying orb click is never called \"the best click\". When your click dies inside the look-ahead and no tick inside the orb lives longer, the press goes to the normal search (late-crash / best-effort rules included) and the search may only use delays that still fire the same orb, so the orb is never skipped. A press made inside an orb is also never pushed behind a pending delay (that put the click outside the orb), and a press in front of an orb is held onto it whenever the click really fires it.",
+			"description": "For frame-perfect orbs, retry timings while passing through the same orb. v2.94: covers ship orb clicks too. A press made while already inside an orb counts as safe only if it also survives with you half a tick ahead of and behind (see 'Robust saves'). Otherwise every tick of the pass through the same orb is tried: a tick that clears the look-ahead wins, and when your click does not clear it any tick that lives longer is used as well. An early press in front of an orb that has nothing above or below it is still held onto the orb (the orb path has to live past the late-crash line), instead of being applied where it misses the orb - that was the \"some orbs are just skipped\" case. It never picks the last tick you are still touching the orb on. Needs 'Orb alignment' and 'Orb / pad / portal prediction'. v2.95: a dying orb click is never called \"the best click\". When your click dies inside the look-ahead and no tick inside the orb lives longer, the press goes to the normal search (late-crash / best-effort rules included) and the search may only use delays that still fire the same orb, so the orb is never skipped. A press made inside an orb is also never pushed behind a pending delay (that put the click outside the orb), and a press in front of an orb is held onto it whenever the click really fires it. v2.96: orb windows shorter than one frame get a sub-frame pass (see \"Orbs: sub-frame timings\").",
+			"default": true
+		},
+		"subframe-orbs": {
+			"type": "bool",
+			"name": "Orbs: sub-frame timings (CBF)",
+			"description": "v2.96: makes orb clicks whose usable window is shorter than one frame work - the first pink orb in Amethyst, UFO orb chains through a one-block gap, and similar frame-perfect orbs. Such a window is treated as sub-frame: the 'does this click hold up' test uses a quarter tick of slack instead of half a tick, the last tick you still touch the orb on can be used again (the old rule refused it, and a 1-2 tick orb then had no timing left to try), and a click made with Click Between Frames keeps the in-tick position the prediction already modelled (0.43 of a tick = 0.11f) instead of being re-searched to 'a safer spot' it never had. The console shows the window in ticks and your click position in ticks and frames ('[sub-frame orb: 2t window, click at @0.43t (0.11f)]'). Off: the old whole-tick rules.",
 			"default": true
 		},
 		"cube-late-crash": {
@@ -264,7 +270,7 @@
 		"ufo-smart": {
 			"type": "bool",
 			"name": "UFO: smart flaps",
-			"description": "A UFO crash only counts if one more flap 6 / 12 / 18 ticks before it couldn't have saved you, landing on something counts as safe, the smallest delay that works wins, and fast flapping goes straight through (spam guard). Off = UFO uses the plain rules like before.",
+			"description": "A UFO crash only counts if one more flap 6 / 12 / 18 ticks before it couldn't have saved you, landing on something counts as safe, the smallest delay that works wins, and fast flapping goes straight through (spam guard). Off = UFO uses the plain rules like before. v2.96: an orb press is judged on its own path - the \"you could have flapped again\" excuse used to call every UFO orb click safe, so an early click was never re-timed into the orb (the Amethyst pink orb / one-block gap case).",
 			"default": true
 		},
 		"more-time-death-spots": {

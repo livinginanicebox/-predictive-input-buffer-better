@@ -1,4 +1,4 @@
-// Click Before Frames v2.95 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
+// Click Before Frames v2.96 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
 // ahead with your input. If the ghost dies, the input is retried with 1..N ticks of
@@ -239,6 +239,10 @@ namespace {
         bool orbNowDies = false;     // v2.95: the orb click you made dies inside the look-ahead
         bool orbBestEffort = false;  // v2.95: the press was moved onto the orb with no fully safe timing
         bool orbUrgent = false;      // v2.95: the click was sent now instead of behind a pending delay
+        bool subFrameOrbs = true;    // v2.96: sub-frame (CBF) orb timings
+        float clickFraction = 0.f;   // v2.96: where inside the tick the real click landed (0 = on the tick)
+        bool subFrameOrbWindow = false;  // v2.96: this orb's usable window is under one frame
+        int orbWindowTicks = 0;      // v2.96: ticks the current orb is usable for (for the log)
 
         bool tryBothOrbs = true;     // v2.4: if a run touches an orb and dies, retry with the other orb choice
         bool orbClick = true;        // v2.4: orb choice of the current run
@@ -549,6 +553,7 @@ namespace {
         buf.spamGap = static_cast<int>(mod->getSettingValue<int64_t>("wave-spam-gap"));
         buf.orbAlign = mod->getSettingValue<bool>("orb-align");
         buf.orbTiming = mod->getSettingValue<bool>("orb-timing");
+        buf.subFrameOrbs = mod->getSettingValue<bool>("subframe-orbs");  // v2.96
         buf.orbAlignGround = mod->getSettingValue<bool>("orb-align-ground");
         buf.fullState = mod->getSettingValue<bool>("full-ghost-state");
         buf.learn = mod->getSettingValue<bool>("level-memory");
@@ -660,8 +665,8 @@ namespace {
         text += fmt::format("{} | physics ~{:.0f} steps/s\n", stageText(), 60.f / dt);
         text += fmt::format("budget {:g} ms | smart {} | full state {} | robust {} | late crash {} | practice only {}\n", buf.budgetMs,
             buf.smart, buf.fullState, buf.robustSaves, buf.lateCrash, buf.practiceOnly);
-        text += fmt::format("orbs: align {} (ground {}, {}t) timing {} assume {} both {} | memory {} ({} spots)\n", buf.orbAlign,
-            buf.orbAlignGround, buf.orbWindow, buf.orbTiming, buf.assumeOrbs, buf.tryBothOrbs, buf.learn, memorySpots());
+        text += fmt::format("orbs: align {} (ground {}, {}t) timing {} sub-frame {} assume {} both {} | memory {} ({} spots)\n", buf.orbAlign,
+            buf.orbAlignGround, buf.orbWindow, buf.orbTiming, buf.subFrameOrbs, buf.assumeOrbs, buf.tryBothOrbs, buf.learn, memorySpots());
         text += fmt::format("wave: v4.6 {} margin {} tight corridors {} horizon {} spam gap {} | robot smart {} | spider smart {} | ship {} (same max delay as every mode)\n",
             buf.waveV46, buf.waveMargin, buf.waveTight, buf.waveHorizon, buf.spamGap, buf.robotSmart, buf.spiderSmart, buf.shipBuffer);
         text += fmt::format("auto-release: wave {} robot {} dash {} normal runs {} window {} | movers: avoid {} predict {}\n",
@@ -2008,6 +2013,8 @@ namespace {
         buf.orbWasGround = false;
         buf.orbNowDies = false;      // v2.95
         buf.orbBestEffort = false;   // v2.95
+        buf.subFrameOrbWindow = false;  // v2.96
+        buf.orbWindowTicks = 0;         // v2.96
 
         // 1. Cheap probe: without pressing, does the ghost reach an orb soon?
         // v2.94: a press that already touches one orb may be aimed at the NEXT one (frame
@@ -2053,12 +2060,22 @@ namespace {
         // Used both to decide whether the click you made is really safe - not just at the exact
         // predicted spot - and to pick a re-timed tick that is.
         float orbShift = std::max(0.3f, 0.5f * (311.58f / 240.f) * (std::abs(p1->m_playerSpeed) / 0.9f));
+        // v2.96: a window shorter than one frame (the first pink orb in Amethyst and the like) is
+        // treated as sub-frame: a quarter-tick safety shift instead of half a tick, the last tick
+        // inside the orb is usable when the click really sits inside its tick (CBF), and the
+        // click you made keeps the sub-tick position the prediction already modelled.
+        int ticksPerFrame = st(4);
+        bool subFrame = buf.subFrameOrbs && prediction_policy::subFrameWindow(touch, lastTouch, ticksPerFrame);
+        buf.subFrameOrbWindow = subFrame;
+        buf.orbWindowTicks = lastTouch >= touch ? lastTouch - touch + 1 : 0;
+        float safetyShift = prediction_policy::orbSafetyShift(orbShift, subFrame);
+        bool subTickClick = prediction_policy::keepSubTickClick(buf.cbfSync, subFrame, buf.clickFraction > 0.01f);
         // v2.92: `sameOrb` is only required when picking a re-timed tick. For "is the click you
         // made safe", the shifted ghost is 0.6px away and may legitimately touch the orb a tick
         // earlier or later - what matters is that it survives, not which orb it used. Requiring the
         // same orb there made almost every click "fragile" and sent it down the re-time path.
         auto holdsUp = [&](int k, int need, bool sameOrb = true) {
-            for (float off : { orbShift, -orbShift }) {
+            for (float off : { safetyShift, -safetyShift }) {
                 buf.ghostShiftX = off;
                 SimEnd e;
                 int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &e);
@@ -2104,10 +2121,14 @@ namespace {
                 // v2.94: ship orb clicks keep their timing too (same rule as ship presses): a
                 // straight-fly feather into an orb that works is not retimed for a fraction of a
                 // tick, which only moved the ship off its line.
-                if (nowSafe && buf.robustSaves && !shipAlign && clickMs() < buf.budgetMs && !holdsUp(0, horizon, false)) {
+                // v2.96: with CBF a sub-frame click already sits at its real position inside the
+                // tick, so a quarter/half-tick shift is not "the exact spot" - it is a move to a
+                // timing the player never made. Such a click keeps the timing the prediction
+                // modelled (that is the whole 0.43-frame case) instead of being re-timed.
+                if (nowSafe && buf.robustSaves && !shipAlign && !subTickClick && clickMs() < buf.budgetMs && !holdsUp(0, horizon, false)) {
                     nowSafe = false;
                     if (buf.explain) {
-                        trace += " (safe only at the exact spot)";
+                        trace += subFrame ? " (sub-frame orb: no room for a half-tick shift)" : " (safe only at the exact spot)";
                     }
                 }
                 if (!buf.orbTiming || nowSafe) {
@@ -2163,7 +2184,11 @@ namespace {
                 // v2.87: re-timing never uses the very last tick you are still touching the orb
                 // on - a prediction that is a fraction of a tick off would put the press outside
                 // the orb and the click would do nothing at all.
-                int endK = retimingOrb ? std::min(scanEnd, std::max(touch + 1, lastTouch)) : scanEnd;
+                // v2.96: in a sub-frame window that rule left no candidate at all (a 1-2 tick
+                // orb had nothing to try). With CBF the click can sit in the middle of its tick,
+                // so the last touch tick is used again for sub-frame orbs.
+                bool lastTickOK = prediction_policy::lastOrbTickUsable(buf.cbfSync, subFrame, buf.clickFraction);
+                int endK = retimingOrb ? std::min(scanEnd, lastTickOK ? lastTouch : std::max(touch + 1, lastTouch)) : scanEnd;
                 for (int k = std::max(1, touch - 1); k <= endK; ++k) {
                     if (k > legacyAlignEnd && clickMs() > buf.budgetMs) {
                         break;
@@ -2761,7 +2786,12 @@ namespace {
     int ufoScore(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, int delay, int horizon, int releaseAfter, int target,
         SimEnd* end) {
         int ret = simulateOrbs(layer, p1, p2, dual, delay, true, horizon, releaseAfter, target, end);
-        if (ret >= target || *end == SimEnd::StopSearch || quickScore) {
+        // v2.96: an orb press is judged on its own path. "You could have flapped again" excused
+        // almost every UFO orb click (some later flap can nearly always recover), so the click
+        // was passed through at its early timing instead of being re-timed into the orb - which
+        // is exactly what the first pink orb in Amethyst / a one-block gap needs.
+        bool usedOrb = prediction_policy::pressUsedOrb(buf.orbUsedTick, st(2));
+        if (ret >= target || *end == SimEnd::StopSearch || quickScore || usedOrb) {
             return ret;
         }
         for (int margin : UFO_REFLAP) {
@@ -3482,6 +3512,7 @@ namespace {
         buf.isPlayer1 = isPlayer1;
         buf.realInput = down;
         buf.shipStraight = false;
+        buf.subFrameOrbWindow = false;  // v2.96: set again by alignOrb when the orb window is sub-frame
         if (buf.autoReleased) {
             // the game already let go for you: your real release has nothing left to do
             buf.autoReleased = false;
@@ -3517,6 +3548,9 @@ namespace {
             midTick = std::clamp((p1->getPosition().x - buf.tickStartX) / buf.tickDx, 0.f, 0.999f);
         }
         buf.firstStep = 1.f - midTick;
+        // v2.96: where inside the tick the click really landed (CBF). A sub-frame orb window is
+        // buffered around this real position instead of a guessed whole-tick one.
+        buf.clickFraction = midTick;
         struct FirstStepReset {
             ~FirstStepReset() {
                 buf.firstStep = 1.f;
@@ -3773,18 +3807,25 @@ namespace {
                 return false;
             }
             if (k > 0) {
+                // v2.96: say when the orb window was shorter than a frame and where the click sat
+                // inside its tick, so a sub-frame timing (e.g. 0.43 of a tick = 0.11f) is visible.
+                std::string orbTag = buf.subFrameOrbWindow
+                    ? fmt::format("  [sub-frame orb: {}t window, click at @{:.2f}t ({})]", buf.orbWindowTicks, buf.clickFraction,
+                          frameText(buf.clickFraction))
+                    : std::string();
                 if (buf.orbWasTiming) {
-                    say("ORB timing +{}t ({}): your click {}t ({}) -> {}t{}", k, frameText(k), buf.orbNowRet, frameText(buf.orbNowRet), orbLanded,
+                    say("ORB timing +{}t ({}): your click {}t ({}) -> {}t{}{}", k, frameText(k), buf.orbNowRet, frameText(buf.orbNowRet), orbLanded,
                         orbLanded >= horizon ? std::string(" (clears the look-ahead)")
-                                             : fmt::format(" (your click dies at {}t, this one lives longer but still dies later)", buf.orbNowRet));
+                                             : fmt::format(" (your click dies at {}t, this one lives longer but still dies later)", buf.orbNowRet),
+                        orbTag);
                 }
                 else if (buf.orbWasGround) {
-                    say("ORB press +{}t ({}): your ground jump died at {}t, the click now lands in the orb -> {}t", k, frameText(k),
-                        buf.orbNowRet, orbLanded);
+                    say("ORB press +{}t ({}): your ground jump died at {}t, the click now lands in the orb -> {}t ({}){}", k, frameText(k),
+                        buf.orbNowRet, orbLanded, frameText(orbLanded), orbTag);
                 }
                 else {
-                    say("ORB press +{}t ({}) -> {}t ({}){}", k, frameText(k), orbLanded, frameText(orbLanded),
-                        buf.orbBestEffort ? "  (best effort: no tick inside the orb clears the look-ahead)" : "");
+                    say("ORB press +{}t ({}) -> {}t ({}){}{}", k, frameText(k), orbLanded, frameText(orbLanded),
+                        buf.orbBestEffort ? "  (best effort: no tick inside the orb clears the look-ahead)" : "", orbTag);
                 }
                 if (orbLanded >= horizon) {
                     noteSave(layer, k);
@@ -3824,7 +3865,8 @@ namespace {
                 // v2.95: the press is about to leave the orb, so no delay can both save it and
                 // still fire the orb. Leave the player's click (and the orb) exactly as it is.
                 if (buf.explain) {
-                    say("orb timing: no tick left inside the orb to delay into, the click stays where it is");
+                    say("orb timing: no tick left inside the orb to delay into ({}t window), the click stays where it is",
+                        buf.orbWindowTicks);
                 }
                 buf.appliedInput = down;
                 return false;
@@ -3895,7 +3937,9 @@ namespace {
         }
 
         // v2.36: with CBF, where inside the tick the click landed (0 = on the tick)
-        std::string tickTag = midTick > 0.f ? fmt::format(" @{:.2f}", midTick) : std::string();
+        // v2.96: a CBF click sits at a fraction of a tick; show it in ticks and in frames, so
+        // "0.43 frames" style sub-tick timings are readable in the log.
+        std::string tickTag = midTick > 0.f ? fmt::format(" @{:.2f}t ({})", midTick, frameText(midTick)) : std::string();
         // The same judgement this mode's search uses, for a single delay.
         auto scoreAt = [&](int k, int target, SimEnd* e) {
             return cubeStyleWave ? waveScore(layer, p1, p2, dual, k, down, horizon, target, e)
@@ -3914,11 +3958,16 @@ namespace {
         // fall through and search for a timing that does hold up. If no timing holds up better
         // than your click, the click still goes through untouched (below).
         bool fragilePass = false;
+        // v2.96: a CBF click in a sub-frame orb window keeps the in-tick position the prediction
+        // already used. Shifting the ghost half a tick either way asks for a timing the player
+        // never made (0.43 of a tick is a real position, not an exact-spot fluke).
+        bool subTickOrbClick = prediction_policy::keepSubTickClick(buf.cbfSync && buf.subFrameOrbs, buf.subFrameOrbWindow,
+            buf.clickFraction > 0.01f);
         if (base >= horizon) {
             // v2.94: ship is left exactly where it is when the tap already survives. Re-searching
             // "safe only at the exact spot" retimed straight-fly feathers that were fine and
             // pushed the ship off its line - that is the "it skips my clicks" ship complaint.
-            if (buf.robustSaves && !prediction_policy::leaveSafeInput(anyShip, base >= horizon) &&
+            if (buf.robustSaves && !subTickOrbClick && !prediction_policy::leaveSafeInput(anyShip, base >= horizon) &&
                 !(anyWave && buf.waveV46) && clickMs() < buf.budgetMs) {
                 float shiftX = std::max(0.3f, 0.5f * (311.58f / 240.f) * (std::abs(p1->m_playerSpeed) / 0.9f));
                 auto holdsUp = [&](int k) {

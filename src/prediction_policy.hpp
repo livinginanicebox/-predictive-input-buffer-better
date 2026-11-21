@@ -65,6 +65,44 @@ namespace prediction_policy {
         return clickSurvivesLookahead || foundBetter;
     }
 
+    // v2.96 sub-frame orb timings (Click Between Frames). Some orb clicks (the first pink orb
+    // in Amethyst, UFO orb chains through a one-block gap) only have a window of a few ticks -
+    // under one frame. The whole-tick rules below were built for windows many frames wide:
+    //   * the "does this hold up" test shifted the ghost half a tick either way, which is a big
+    //     share of a sub-frame window, so a working click read "safe only at the exact spot";
+    //   * re-timing refused the last tick you still touch the orb on, and with a 1-2 tick
+    //     window that left no candidate at all.
+    // With CBF the click you made already sits at a real sub-tick position (0.43 of a tick,
+    // ~0.11 frames), so that position is used as it is instead of being guessed at.
+    constexpr bool subFrameWindow(int firstTouch, int lastTouch, int ticksPerFrame) {
+        return firstTouch >= 0 && lastTouch >= firstTouch && (lastTouch - firstTouch) < std::max(1, ticksPerFrame);
+    }
+
+    // Half a tick of movement is a huge share of a sub-frame window: use a quarter inside it.
+    inline float orbSafetyShift(float halfTickShift, bool subFrame) {
+        return subFrame ? std::max(0.15f, halfTickShift * 0.5f) : halfTickShift;
+    }
+
+    // A CBF click lands inside the tick, so the last tick you still touch the orb on can be
+    // used when the click sits in the middle of its tick. Whole-tick predictions never use it
+    // (a fraction of a tick either way would put the press outside the orb).
+    constexpr bool lastOrbTickUsable(bool cbfSync, bool subFrame, float clickFraction) {
+        return cbfSync && subFrame && clickFraction >= 0.08f && clickFraction <= 0.92f;
+    }
+
+    // The click is already at a real sub-tick position, so the half-tick "safe only at the
+    // exact spot" re-search must not move it: it would retime a working sub-frame timing.
+    constexpr bool keepSubTickClick(bool cbfSync, bool subFrame, bool midTick) {
+        return cbfSync && subFrame && midTick;
+    }
+
+    // v2.96 UFO: an orb press is judged on its own path. The "you could have flapped again"
+    // excuse made every UFO orb click read safe (some later flap could always recover), so the
+    // click was never re-timed and the sub-frame timing that gets through the gap was lost.
+    constexpr bool pressUsedOrb(int usedOrbTick, int withinTicks) {
+        return usedOrbTick >= 0 && usedOrbTick <= withinTicks;
+    }
+
     template <typename Player>
     bool invertedWave(Player const* p1, Player const* p2, bool dual) {
         return (p1 && p1->m_isDart && p1->m_isUpsideDown) ||
