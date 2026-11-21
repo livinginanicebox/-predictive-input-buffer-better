@@ -3684,9 +3684,14 @@ namespace {
                     // v2.95: distinguish "the jump dies and the orb saves it" from "the orb is
                     // under you, and the click fires it instead of jumping past it".
                     bool jumpDied = buf.orbNowRet < orbNeed;
-                    say(jumpDied ? "ORB press +{}t ({:g}f): your ground jump dies at {}t, the click now lands in the orb -> {}t"
-                                 : "ORB press +{}t ({:g}f): your jump left the orb unclicked, the click now fires it -> {}t",
-                        k, k * TICK, buf.orbNowRet, orbLanded);
+                    if (jumpDied) {
+                        say("ORB press +{}t ({:g}f): your ground jump dies at {}t, the click now lands in the orb -> {}t", k, k * TICK,
+                            buf.orbNowRet, orbLanded);
+                    }
+                    else {
+                        say("ORB press +{}t ({:g}f): your jump left the orb unclicked, the click now fires it -> {}t", k, k * TICK,
+                            orbLanded);
+                    }
                 }
                 else {
                     say("ORB press +{}t ({:g}f) -> {}t", k, k * TICK, orbLanded);
