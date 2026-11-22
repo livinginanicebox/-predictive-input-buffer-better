@@ -1402,6 +1402,15 @@ namespace {
     }
 
     void restoreObjects() {
+        // Clear the ghosts' references BEFORE restoring shared objects. resetTouchedRings
+        // can change the rings' activation state; doing this in the next copyState() instead
+        // would mutate real orbs after their snapshots had already been discarded.
+        if (buf.ghost1) {
+            buf.ghost1->resetTouchedRings(true);
+        }
+        if (buf.ghost2) {
+            buf.ghost2->resetTouchedRings(true);
+        }
         for (auto const& s : buf.snapshots) {
             if (s.ring) {
                 // v2.85: a predicted dash left the real dash orb claimed and its ring grown to
@@ -3373,8 +3382,9 @@ namespace {
         // v2.94: ship included - a ship orb click was never checked or re-timed, so frame
         // perfect ship orb clicks (the whole point of ship buffering) were passed through.
         bool orbRetime = down && touchingOrb && buf.queue.empty() && buf.smart && buf.orbAlign && buf.orbTiming &&
-            !p1->m_isDart && !(p2 && p2->m_isDart) &&
-            (p1->m_isOnGround && (!p2 || p2->m_isOnGround) ? buf.orbAlignGround : true);
+            !p1->m_isDart && !(p2 && p2->m_isDart);
+        // "Also from the ground" controls converting jumps into future orb clicks,
+        // not timing a press that is already touching an orb.
         if (prediction_policy::passOrbPress(down, touchingOrb, buf.queue.empty(), orbRetime)) {
             buf.appliedInput = true;
             if (buf.explain) {
@@ -5156,6 +5166,12 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
                             continue;
                         }
                     }
+                }
+                // Collision handling can claim a ring before playerTouchedRing/ringJump.
+                // Snapshot it at the boundary, not after that first mutation, including
+                // probes which only touch the orb without activating it.
+                if (typeinfo_cast<RingObject*>(object)) {
+                    snapshotObject(object);
                 }
                 relevant.push_back(object);
                 if (buf.trackMovers && (COLLIDING_TYPES & bit)) {
