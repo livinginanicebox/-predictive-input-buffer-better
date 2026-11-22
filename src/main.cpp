@@ -1,4 +1,4 @@
-// Click Before Frames v2.94 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
+// Click Before Frames v2.96 (cube-style wave, wave auto-release, orb timing, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
 // ahead with your input. If the ghost dies, the input is retried with 1..N ticks of
@@ -229,12 +229,13 @@ namespace {
         bool assumeOrbs = true;      // v2.2: the ghost clicks every orb it touches ("calculation mode")
         bool held1 = false, held2 = false;   // button state the ghosts are meant to be in
         bool auto1 = false, auto2 = false;   // an orb auto-click is currently held on this ghost
-        bool orbTiming = true;       // v2.26: orb clicks at specific timings inside the orb
+        bool orbTiming = true;       // v2.95: the one orb toggle - times early presses onto orbs and re-times presses inside them
         int orbClickDelay = 0;       // v2.26: ghost orb auto-clicks wait this many ticks into the orb
         int autoAt1 = -1, autoAt2 = -1;      // v2.26: tick a delayed orb auto-click fires (-1 none, -2 done)
         bool orbWasTiming = false;   // v2.26: the last orb save re-timed a press that was already in the orb
         bool orbWasGround = false;   // v2.93: the last orb save moved a ground press (a jump) into an orb
         int orbNowRet = 0;           // v2.87: ticks the click you actually made survived (for the log)
+        bool orbDeliverNow = false;  // v2.96: timeOrb found an orb already on you - deliver the press now, never let the generic search move it off the orb
 
         bool tryBothOrbs = true;     // v2.4: if a run touches an orb and dies, retry with the other orb choice
         bool orbClick = true;        // v2.4: orb choice of the current run
@@ -249,8 +250,7 @@ namespace {
         int spamGap = 16;            // v2.5.2: inputs closer than this (ticks) count toward wave spam
         bool waveMargin = true;      // v2.10: center wave saves in the safe window (1 tick of room)
         bool waveV46 = false;        // v2.7: use the old v4.6 wave rules instead of the cube-style ones
-        bool orbAlign = true;        // v2.6: hold an early press back until the ghost is inside the orb
-        bool orbAlignGround = false; // v2.11.1: also align presses made on the ground (jumps)
+        bool orbTimingGround = false; // v2.11.1: also time presses made on the ground (jumps)
         bool ignoreTouching = true;  // v2.31: hazards you touch right now without dying can't kill the ghost
         bool haveRealRect = false;
         CCRect realRect1, realRect2;  // your hitboxes when the prediction starts
@@ -309,7 +309,7 @@ namespace {
         bool usedThisAttempt = false;      // the buffer was on at some point of this attempt
         bool learn = true;           // v2.13: per-level memory learned from your runs
         bool fullState = true;       // v2.11.1: copy the full v2.8 player state into the ghost
-        int orbWindow = 16;          // v2.6: how far ahead (ticks) an orb may be for that
+        int orbTimingWindow = 32;    // v2.95 (was orb alignment's window): how far ahead (ticks) an orb may be for timing
         int simTick = 0;             // v2.6: tick of the current run
         GameObject* firstOrb = nullptr; // first orb encountered by this ghost run
         GameObject* usedOrb = nullptr;  // first orb actually activated by this ghost run
@@ -507,9 +507,8 @@ namespace {
         buf.autoWindow = static_cast<int>(mod->getSettingValue<int64_t>("auto-release-window"));
         buf.driftCheck = mod->getSettingValue<bool>("drift-check");
         buf.spamGap = static_cast<int>(mod->getSettingValue<int64_t>("wave-spam-gap"));
-        buf.orbAlign = mod->getSettingValue<bool>("orb-align");
         buf.orbTiming = mod->getSettingValue<bool>("orb-timing");
-        buf.orbAlignGround = mod->getSettingValue<bool>("orb-align-ground");
+        buf.orbTimingGround = mod->getSettingValue<bool>("orb-timing-ground");
         buf.fullState = mod->getSettingValue<bool>("full-ghost-state");
         buf.learn = mod->getSettingValue<bool>("level-memory");
         buf.robotSmart = mod->getSettingValue<bool>("robot-smart");
@@ -546,7 +545,7 @@ namespace {
         buf.autoNormalRuns = mod->getSettingValue<bool>("auto-release-normal-runs");
         buf.waveV46 = mod->getSettingValue<bool>("wave-v46");
         buf.waveMargin = mod->getSettingValue<bool>("wave-safety-margin") && !buf.lowLatency;
-        buf.orbWindow = static_cast<int>(mod->getSettingValue<int64_t>("orb-align-ticks"));
+        buf.orbTimingWindow = static_cast<int>(mod->getSettingValue<int64_t>("orb-timing-ticks"));
         // v2.71 performance mode: for PCs that drop frames on clicks. Shorter searches, no
         // extra robustness runs off, and the debug runs (drift check, live path view) off.
         // v2.86: performance mode no longer switches orb timing off behind your back - the
@@ -619,8 +618,8 @@ namespace {
         text += fmt::format("{} | physics ~{:.0f} steps/s\n", stageText(), 60.f / dt);
         text += fmt::format("budget {:g} ms | smart {} | full state {} | robust {} | late crash {} | practice only {}\n", buf.budgetMs,
             buf.smart, buf.fullState, buf.robustSaves, buf.lateCrash, buf.practiceOnly);
-        text += fmt::format("orbs: align {} (ground {}, {}t) timing {} assume {} both {} | memory {} ({} spots)\n", buf.orbAlign,
-            buf.orbAlignGround, buf.orbWindow, buf.orbTiming, buf.assumeOrbs, buf.tryBothOrbs, buf.learn, memorySpots());
+        text += fmt::format("orbs: timing {} (ground {}, {}t) assume {} both {} | memory {} ({} spots)\n", buf.orbTiming,
+            buf.orbTimingGround, buf.orbTimingWindow, buf.assumeOrbs, buf.tryBothOrbs, buf.learn, memorySpots());
         text += fmt::format("wave: v4.6 {} margin {} horizon {} spam gap {} | robot smart {} | spider smart {} | ship {} (same max delay as every mode)\n",
             buf.waveV46, buf.waveMargin, buf.waveHorizon, buf.spamGap, buf.robotSmart, buf.spiderSmart, buf.shipBuffer);
         text += fmt::format("auto-release: wave {} robot {} dash {} normal runs {} window {} | movers: avoid {} predict {}\n",
@@ -1950,16 +1949,20 @@ namespace {
         return st(mini ? std::max(20, wh - 15) : wh) + st(8);
     }
 
-    // v2.6 orb alignment: a press made a little before reaching an orb would be wasted
-    // (or jump off the ground instead). Find the delay that lands the press inside the
-    // orb, like the cube buffer does for jumps. Returns that delay, or 0.
+    // v2.95 orb timing (was orb alignment + orb timing as two toggles): a press made a
+    // little before reaching an orb would be wasted (or jump off the ground instead),
+    // and a press already inside an orb can still be at the wrong tick of it. Both are
+    // timed here: find the delay that lands the press inside the orb - or, for a press
+    // already in it, the better tick of the same orb - like the cube buffer does for
+    // jumps. Returns that delay, or 0. Callers only call this with orb timing on.
     // Prefer a fully safe timing. For an early airborne press, fall back to an
     // activation of that same orb even if the predicted path later crashes.
-    int alignOrb(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, int horizon, int releaseAfter, int learned, int* landed,
-        bool fullOnly, bool preferOrb, bool groundPress, bool& originalOrbUsed, bool shipAlign = false) {
+    int timeOrb(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, int horizon, int releaseAfter, int learned, int* landed,
+        bool fullOnly, bool preferOrb, bool groundPress, bool& originalOrbUsed, bool shipTiming = false) {
         originalOrbUsed = false;
         buf.orbWasGround = false;
-        int window = st(std::clamp(buf.orbWindow, 1, MAX_TICKS));
+        buf.orbDeliverNow = false;
+        int window = st(std::clamp(buf.orbTimingWindow, 1, MAX_TICKS));
         int found = 0;
         SimEnd end;
         buf.orbClick = false;  // the press being tested is the orb click
@@ -1972,7 +1975,7 @@ namespace {
         // cannot be used, the probe is re-run letting go first so the next orb is found.
         buf.skipPress = true;
         simulate(layer, p1, p2, dual, 0, true, window + 2, -1, window + 2, &end);
-        // v2.94: if nothing is inside the alignment window, look further ahead (up to the
+        // v2.94: if nothing is inside the timing window, look further ahead (up to the
         // stage's max delay). An orb in open air has nothing above or below it, so pressing
         // now is "safe", the press was applied right away and the orb was never clicked -
         // you just fell through it. With a longer probe it can be held until you're inside.
@@ -1982,8 +1985,8 @@ namespace {
         }
         // v2.94: ship is never held back by a far-away orb - that would change its line for
         // ticks where you were just flying. Ship orbs are handled inside the window only.
-        int probeEnd = shipAlign ? window : std::min(stageCap, st(120));  // 30 frames ahead is plenty
-        if (buf.firstOrbTick < 0 && !groundPress && fullOnly && !shipAlign && probeEnd > window && clickMs() < buf.budgetMs * 0.5) {
+        int probeEnd = shipTiming ? window : std::min(stageCap, st(120));  // 30 frames ahead is plenty
+        if (buf.firstOrbTick < 0 && !groundPress && fullOnly && !shipTiming && probeEnd > window && clickMs() < buf.budgetMs * 0.5) {
             simulate(layer, p1, p2, dual, 0, true, probeEnd + 2, -1, probeEnd + 2, &end);
         }
         buf.skipPress = false;
@@ -1999,7 +2002,7 @@ namespace {
         // the old range ran. Past these limits the scan is opportunistic, and a
         // deep candidate is otherwise opportunistic; airborne orb intent may use
         // a non-safe activation as a fallback.
-        int legacyAlignEnd = std::min(scanEnd, touch + st(6));
+        int legacyTimingEnd = std::min(scanEnd, touch + st(6));
         std::string trace;  // v2.42: what was tried, for the explain log
         // v2.90: half a tick of x movement each way (normal speed 0.9 = 311.58 units a second).
         // Used both to decide whether the click you made is really safe - not just at the exact
@@ -2029,8 +2032,8 @@ namespace {
             buf.orbNowRet = now;
             // v2.94: a ship press that already survives is NEVER moved. Holding a feather back to
             // catch an orb would change the ship's line for those ticks - ship orb clicks are
-            // aligned only when the press as made is not safe (then the orb is what saves it).
-            if (prediction_policy::leaveSafeInput(shipAlign, now >= horizon) && !(buf.orbUsedTick >= 0 && buf.orbUsedTick <= st(2))) {
+            // timed only when the press as made is not safe (then the orb is what saves it).
+            if (prediction_policy::leaveSafeInput(shipTiming, now >= horizon) && !(buf.orbUsedTick >= 0 && buf.orbUsedTick <= st(2))) {
                 buf.orbClick = buf.assumeOrbs;
                 return 0;
             }
@@ -2045,6 +2048,7 @@ namespace {
             // survive the look-ahead is re-timed tick by tick inside the same orb below
             // (before, this returned here, so orb timing never ran for a real orb click).
             // A click that is already fully safe is always left exactly where it is.
+            // (v2.95: this only runs with orb timing on, so no second toggle is checked.)
             bool retimingOrb = false;
             if (nowUses) {
                 bool nowSafe = now >= horizon;
@@ -2055,13 +2059,13 @@ namespace {
                 // v2.94: ship orb clicks keep their timing too (same rule as ship presses): a
                 // straight-fly feather into an orb that works is not retimed for a fraction of a
                 // tick, which only moved the ship off its line.
-                if (nowSafe && buf.robustSaves && !shipAlign && clickMs() < buf.budgetMs && !holdsUp(0, horizon, false)) {
+                if (nowSafe && buf.robustSaves && !shipTiming && clickMs() < buf.budgetMs && !holdsUp(0, horizon, false)) {
                     nowSafe = false;
                     if (buf.explain) {
                         trace += " (safe only at the exact spot)";
                     }
                 }
-                if (!buf.orbTiming || nowSafe) {
+                if (nowSafe) {
                     originalOrbUsed = true;
                     buf.orbClick = buf.assumeOrbs;
                     return 0;
@@ -2069,6 +2073,7 @@ namespace {
                 retimingOrb = true;
                 buf.orbWasTiming = true;
             }
+            bool nearOrb = false;
             if (groundPress) {
                 // v2.93: on the ground a press is a JUMP, so an orb you mean to click never fires
                 // and you jump into whatever is in front of you (a wall of spikes). If that jump
@@ -2077,7 +2082,7 @@ namespace {
                 // v2.94: an orb the press is already on (within a frame) is clicked as well, even
                 // when the jump is fine - an orb in open air used to be skipped entirely because
                 // nothing above or below it made the jump look like a death.
-                bool nearOrb = prediction_policy::groundOrbIntent(touch, st(prediction_policy::GROUND_ORB_REACH));
+                nearOrb = prediction_policy::groundOrbIntent(touch, st(prediction_policy::GROUND_ORB_REACH));
                 if (now >= horizon && !nearOrb) {
                     // your ground jump is fine and there's no orb on you: leave it.
                     if (buf.explain) {
@@ -2115,7 +2120,7 @@ namespace {
                 // the orb and the click would do nothing at all.
                 int endK = retimingOrb ? std::min(scanEnd, std::max(touch + 1, lastTouch)) : scanEnd;
                 for (int k = std::max(1, touch - 1); k <= endK; ++k) {
-                    if (k > legacyAlignEnd && clickMs() > buf.budgetMs) {
+                    if (k > legacyTimingEnd && clickMs() > buf.budgetMs) {
                         break;
                     }
                     int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &end);
@@ -2127,7 +2132,10 @@ namespace {
                         break;
                     }
                     // Even if no path is predicted safe, preserve the requested first orb.
-                    if (prediction_policy::betterOrbFallback(preferOrb, uses, ret, fallbackRet)) {
+                    // v2.96: also for a ground press whose jump dies or whose orb is already
+                    // on you - those are orb clicks too, and must not be skipped either.
+                    bool preserveOrb = prediction_policy::preserveOrbPress(preferOrb, groundPress, now < horizon, nearOrb);
+                    if (prediction_policy::betterOrbFallback(preserveOrb, uses, ret, fallbackRet)) {
                         fallbackK = k;
                         fallbackRet = ret;
                     }
@@ -2159,7 +2167,7 @@ namespace {
                     bool lateOK = retimingOrb && buf.lateCrash > 0 && ret >= st(buf.lateCrash) && ret >= now + st(12);
                     bool good = retimingOrb ? (ret >= horizon || (now < horizon && ret > now) || lateOK)
                                             : ret >= std::min(now, horizon);
-                    if (!uses || !good || (!retimingOrb && (fullOnly || k > legacyAlignEnd) && ret < horizon)) {
+                    if (!uses || !good || (!retimingOrb && (fullOnly || k > legacyTimingEnd) && ret < horizon)) {
                         continue;
                     }
                     // v2.94: an airborne press that already works without the orb is only moved
@@ -2222,15 +2230,41 @@ namespace {
                     // v2.86: an airborne press that misses the orb may still fall back to an
                     // activation of it even when no path is safe. That fallback is never used to
                     // move a click that already used the orb.
-                    // v2.94: an orb with nothing above or below it used to be skipped entirely:
-                    // pressing now is "safe" (nothing to crash into), no tick inside the orb is
-                    // fully safe either, so the press was applied where it was and never hit the
-                    // orb. An airborne / ship press in front of an orb is that orb's click, so it
-                    // is still held onto it when the orb path lives long enough for the crash to
-                    // clearly be the NEXT obstacle (the same late-crash line best-effort saves use).
-                    if (now < horizon || fallbackRet >= st(buf.lateCrash) || fallbackRet >= now) {
+                    // v2.96: that activation is now used whenever this press is an orb click,
+                    // even when the orb path dies sooner than missing the orb would. The old
+                    // gates (only if pressing now dies, or the orb path lives past the
+                    // late-crash line) are exactly what skipped clicked orbs: the press fell
+                    // through to the generic search, which passed it where it missed the orb
+                    // or delayed it onto a non-orb tick, because a death after an orb is
+                    // usually the NEXT input's problem, not a reason to skip the orb. Ship
+                    // keeps the stricter rule (a working feather is never held onto an orb).
+                    if (prediction_policy::useOrbFallback(shipTiming, now, horizon, fallbackRet, st(buf.lateCrash))) {
                         found = fallbackK;
                         *landed = fallbackRet;
+                        if (buf.explain) {
+                            trace += " (orb kept: longest-living activation, not skipped)";
+                        }
+                    }
+                }
+                if (!retimingOrb && found == 0 && !shipTiming &&
+                    prediction_policy::preserveOrbPress(preferOrb, groundPress, now < horizon, nearOrb)) {
+                    // v2.96: no simulated tick activated the orb at all (the scan ran out of
+                    // budget, or the ghost's ringJump refused an orb the real game takes).
+                    // The probe's no-press run still says exactly when you enter the orb, so
+                    // deliver the press on that first tick inside it instead of handing the
+                    // press to the generic search, which knows nothing about the orb and
+                    // would pass it early or delay it past the orb - a skipped orb either way.
+                    if (touch >= 1) {
+                        found = touch;
+                        *landed = 0;
+                        if (buf.explain) {
+                            trace += " (orb kept: held to the first tick inside it)";
+                        }
+                    }
+                    else {
+                        // You are entering the orb right now: the press must go to the game
+                        // untouched, before any search can delay it off the orb.
+                        buf.orbDeliverNow = true;
                     }
                 }
             }
@@ -2240,13 +2274,15 @@ namespace {
                     trace.empty() ? " (nothing to try)" : trace, found > 0 ? fmt::format("+{}t", found) : std::string("no pick"));
             }
         }
-        else if (touch > window && touch <= probeEnd && !groundPress && fullOnly && !shipAlign) {
-            // v2.94: the orb is further ahead than the alignment window. Hold the press until a
+        else if (touch > window && touch <= probeEnd && !groundPress && fullOnly && !shipTiming) {
+            // v2.94: the orb is further ahead than the timing window. Hold the press until a
             // tick inside it that clears the whole look-ahead - this is what used to do nothing
             // at all (press applied to the game, orb missed, fall). Only cube-style airborne
-            // presses take this path, and only with a path that is fully safe.
+            // presses take this path; a fully-safe tick is preferred, but v2.96 falls back to
+            // the longest-living activation so the orb is clicked rather than skipped.
             int endK = std::min({ lastTouch >= touch ? lastTouch + 1 : touch + st(6), touch + st(6), probeEnd });
             int runStart = -1, safeStart = -1, safeEnd = -1;
+            int fallbackK = 0, fallbackRet = -1;  // v2.96: longest-living activation of this orb
             for (int k = std::max(1, touch - 1); k <= endK; ++k) {
                 if (clickMs() > buf.budgetMs) {
                     break;
@@ -2258,6 +2294,10 @@ namespace {
                 }
                 if (end == SimEnd::StopSearch) {
                     break;
+                }
+                if (prediction_policy::betterOrbFallback(true, uses, ret, fallbackRet)) {
+                    fallbackK = k;
+                    fallbackRet = ret;
                 }
                 if (uses && ret >= horizon) {
                     if (runStart < 0) {
@@ -2275,6 +2315,14 @@ namespace {
             if (safeStart >= 0) {
                 found = (safeStart + safeEnd) / 2;
                 *landed = horizon;
+                buf.orbWasTiming = false;
+            }
+            else if (fallbackK > 0) {
+                // v2.96: no fully-safe tick inside the far orb either - still click it (at
+                // its longest-living tick) instead of letting the press fall through and
+                // be applied where it misses the orb entirely.
+                found = fallbackK;
+                *landed = fallbackRet;
                 buf.orbWasTiming = false;
             }
             if (buf.explain) {
@@ -2529,7 +2577,7 @@ namespace {
         }
         crashFixed = false;
         // v2.84: the full pass gets the other half of the *search* budget. It used
-        // to get only what was left of the whole click budget, so orb alignment and
+        // to get only what was left of the whole click budget, so orb timing and
         // the base run could spend it all and robot's full hold scoring never ran.
         double left = buf.budgetMs * 0.5;
         return searchSmallest(horizon, maxDelay, base, landed, score, left, false, needFull);
@@ -3028,7 +3076,7 @@ namespace {
     // v2.51 per-level settings: your switches (v2.59: not the stage, not low latency) are remembered for each level and
     // come back when you open it again. Outside a level (and in levels you haven't changed
     // anything in) the normal settings apply.
-    constexpr char const* PROFILE_KEYS[] = { "robust-saves", "orb-align", "orb-timing", "level-memory",
+    constexpr char const* PROFILE_KEYS[] = { "robust-saves", "orb-timing", "level-memory",
         "more-time-death-spots", "ship-buffer", "ufo-smart", "ball-smart", "swing-smart", "cbf-sync", "predict-moving-objects",
         "training-mode" };
 
@@ -3368,13 +3416,14 @@ namespace {
         // v2.86: "Orb timing" used to do nothing at all for the clicks that actually hit
         // an orb: a press made inside an orb was always passed straight to the game, so
         // neither the window nor the timing setting could change an orb click. With orb
-        // timing on, that press now goes through alignOrb like any other and is only moved
+        // timing on, that press now goes through timeOrb like any other and is only moved
         // when a tick inside the same orb lives longer (see the fallback below).
         // v2.94: ship included - a ship orb click was never checked or re-timed, so frame
         // perfect ship orb clicks (the whole point of ship buffering) were passed through.
-        bool orbRetime = down && touchingOrb && buf.queue.empty() && buf.smart && buf.orbAlign && buf.orbTiming &&
-            !p1->m_isDart && !(p2 && p2->m_isDart) &&
-            (p1->m_isOnGround && (!p2 || p2->m_isOnGround) ? buf.orbAlignGround : true);
+        // v2.95: orb timing is the only gate here - the old "Orb alignment" toggle that
+        // also had to be on for this to run is gone.
+        bool orbRetime = prediction_policy::retimeOrbPress(down, touchingOrb, buf.queue.empty(), buf.smart, buf.orbTiming,
+            p1->m_isDart || (p2 && p2->m_isDart), p1->m_isOnGround && (!p2 || p2->m_isOnGround), buf.orbTimingGround);
         if (prediction_policy::passOrbPress(down, touchingOrb, buf.queue.empty(), orbRetime)) {
             buf.appliedInput = true;
             if (buf.explain) {
@@ -3549,14 +3598,16 @@ namespace {
         }
 
         // On the ground a press is a jump. v2.93: if that jump is a death, the press is moved into
-        // an orb ahead instead (alignOrb decides); "also from the ground" forces it even when the
+        // an orb ahead instead (timeOrb decides); "also from the ground" forces it even when the
         // jump is fine.
         bool grounded = p1->m_isOnGround && (!p2 || p2->m_isOnGround);
-        // v2.93: grounded presses get here too - alignOrb itself checks whether the ground jump
+        // v2.93: grounded presses get here too - timeOrb itself checks whether the ground jump
         // is a death first, so a press that jumps fine is never turned into an orb hit.
-        // v2.94: ship presses go through orb alignment too (ship orb clicks used to be
+        // v2.94: ship presses go through orb timing too (ship orb clicks used to be
         // excluded here, so an early ship orb click was never moved onto the orb).
-        if (down && !anyWave && buf.orbAlign && buf.smart) {
+        // v2.95: gated on orb timing alone (orb alignment is gone): with timing on, an
+        // early press is held onto the orb and an inside press is re-timed, in one place.
+        if (down && !anyWave && buf.orbTiming && buf.smart) {
             auto isCubeMode = [](PlayerObject* p) {
                 return p && !p->m_isShip && !p->m_isDart && !p->m_isBird && !p->m_isBall && !p->m_isRobot && !p->m_isSpider &&
                     !p->m_isSwing;
@@ -3564,17 +3615,28 @@ namespace {
             bool cubeOnly = isCubeMode(p1) && (!p2 || isCubeMode(p2));
             // v2.94: ship gets it too - a ship orb click is only moved onto an orb when that
             // path clears the whole look-ahead, never just when it dies later than pressing now.
-            bool fullOnlyAlign = cubeOnly || anyRobot || anyShip;  // v2.84: robot gets cube's rule
+            bool fullOnlyTiming = cubeOnly || anyRobot || anyShip;  // v2.84: robot gets cube's rule
             int orbLanded = 0;
             bool originalOrbUsed = false;
             // Previously failed saves should not permanently block an airborne orb
             // press: the player may still want that orb despite a predicted death.
+            buf.orbDeliverNow = false;  // v2.96: only this click's timeOrb run may set it
             int k = memorySaysSkip(sliceOf(p1)) && grounded
                 ? 0
-                : alignOrb(layer, p1, p2, dual, horizon, releaseAfter, memoryDelay(sliceOf(p1)), &orbLanded, fullOnlyAlign, !grounded, grounded,
+                : timeOrb(layer, p1, p2, dual, horizon, releaseAfter, memoryDelay(sliceOf(p1)), &orbLanded, fullOnlyTiming, !grounded, grounded,
                       originalOrbUsed, anyShip);
             if (originalOrbUsed) {
                 buf.appliedInput = down;
+                return false;
+            }
+            if (k == 0 && buf.orbDeliverNow) {
+                // v2.96: you are entering the orb right now and no simulated tick could be
+                // shown to activate it - your press goes to the game exactly as made, so
+                // the generic search below can never delay it off the orb you clicked.
+                buf.appliedInput = down;
+                if (buf.explain) {
+                    say("orb timing: press delivered on the orb, not moved");
+                }
                 return false;
             }
             if (k > 0 && trainInstead(layer, k, down, "orb")) {
@@ -4129,7 +4191,6 @@ class BufferMenu : public geode::Popup {
     static constexpr Option OPTIONS[] = {
         { "low-latency", "Low latency" },
         { "robust-saves", "Robust saves" },
-        { "orb-align", "Orb alignment" },
         { "orb-timing", "Orb timing" },
         { "level-memory", "Level memory" },
         { "more-time-death-spots", "More time (death spots)" },
@@ -4279,7 +4340,6 @@ private:
             mod->setSettingValue<bool>("performance-mode", false);
             mod->setSettingValue<bool>("training-mode", false);
             mod->setSettingValue<bool>("smart-prediction", true);
-            mod->setSettingValue<bool>("orb-align", true);
             mod->setSettingValue<bool>("wave-v46", false);
             mod->setSettingValue<int64_t>("wave-spam-gap", 6);
             mod->setSettingValue<double>("sim-budget-ms", std::max(30.0, mod->getSettingValue<double>("sim-budget-ms")));
@@ -4489,11 +4549,29 @@ $on_mod(Loaded) {
         Mod::get()->setSettingValue<bool>("low-latency", false);
         Mod::get()->setSavedValue("low-latency-v260", true);
     }
-    // v2.82: the orb alignment window doubles once (was 16t = 4f, often shorter than the
+    // v2.95: orb alignment is gone - orb timing does both jobs now. Carry the old
+    // alignment window / from-the-ground values over to their renamed orb timing
+    // settings once, so nobody's tuned window is lost with the old keys. The old
+    // keys are read from the raw saved-settings data: getSettingValue() only knows
+    // settings still defined in mod.json, so it would return defaults for them.
+    if (!Mod::get()->getSavedValue<bool>("orb-timing-v295", false)) {
+        auto& savedSettings = Mod::get()->getSavedSettingsData();
+        if (savedSettings.contains("orb-align-ticks")) {
+            int64_t oldWindow = savedSettings["orb-align-ticks"].as<int64_t>().unwrapOr(0);
+            if (oldWindow >= 1) {
+                Mod::get()->setSettingValue<int64_t>("orb-timing-ticks", oldWindow);
+            }
+        }
+        if (savedSettings.contains("orb-align-ground") && savedSettings["orb-align-ground"].as<bool>().unwrapOr(false)) {
+            Mod::get()->setSettingValue<bool>("orb-timing-ground", true);
+        }
+        Mod::get()->setSavedValue("orb-timing-v295", true);
+    }
+    // v2.82: the orb timing window doubles once (was 16t = 4f, often shorter than the
     // approach to a frame-perfect orb); larger custom values are kept as they are.
     if (!Mod::get()->getSavedValue<bool>("orb-window-v282", false)) {
-        if (Mod::get()->getSettingValue<int64_t>("orb-align-ticks") < 32) {
-            Mod::get()->setSettingValue<int64_t>("orb-align-ticks", 32);
+        if (Mod::get()->getSettingValue<int64_t>("orb-timing-ticks") < 32) {
+            Mod::get()->setSettingValue<int64_t>("orb-timing-ticks", 32);
         }
         Mod::get()->setSavedValue("orb-window-v282", true);
     }

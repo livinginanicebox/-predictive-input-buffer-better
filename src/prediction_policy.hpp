@@ -11,6 +11,34 @@ namespace prediction_policy {
         return down && touchingOrb && queueEmpty && !retimeInOrb;
     }
 
+    // v2.96: which presses count as "clicked for that orb" and must never be delivered
+    // where they would miss it. An early airborne press in front of an orb is that
+    // orb's click; a ground press only is when the jump it would make dies, or when
+    // the orb is already on you (a working ground jump stays a jump).
+    constexpr bool preserveOrbPress(bool preferOrb, bool groundPress, bool pressNowDies, bool nearOrb) {
+        return preferOrb || (groundPress && (pressNowDies || nearOrb));
+    }
+
+    // v2.96: when no tick inside the orb is fully safe, the longest-living tick that
+    // still activates the orb is used anyway - delivering the press anywhere else
+    // (passed early, or delayed by the generic search) just skips the orb the player
+    // clicked. Ship keeps the old stricter rule: a feather that already works is
+    // never held back onto an orb whose path dies sooner, or its line is ruined.
+    constexpr bool useOrbFallback(bool ship, int pressNowSurvival, int horizon, int fallbackSurvival, int lateCrashTicks) {
+        return !ship || pressNowSurvival < horizon || fallbackSurvival >= lateCrashTicks || fallbackSurvival >= pressNowSurvival;
+    }
+
+    // v2.95: orb timing is the only orb gate (the separate "orb alignment" toggle is
+    // gone). When it is on it does both jobs the two toggles used to split: an early
+    // press is held until it lands inside the orb, and a press already inside an orb
+    // is re-timed within that same orb - exactly as if alignment AND timing were on.
+    // This decides the inside-an-orb half; grounded presses only re-time when the
+    // "also from the ground" timing option is on (a ground press is a jump first).
+    constexpr bool retimeOrbPress(bool down, bool touchingOrb, bool queueEmpty, bool smart, bool orbTiming, bool dart,
+        bool grounded, bool timingFromGround) {
+        return down && touchingOrb && queueEmpty && smart && orbTiming && !dart && (grounded ? timingFromGround : true);
+    }
+
     template <typename T>
     constexpr bool sameOrb(T const* target, T const* used) {
         return target && target == used;

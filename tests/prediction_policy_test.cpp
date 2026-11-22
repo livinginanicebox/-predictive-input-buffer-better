@@ -16,6 +16,32 @@ int main() {
     assert(!passOrbPress(true, true, false, false)); // keep pending inputs ordered
     // v2.86 "orb timing": a press inside an orb is re-timed instead of passed through.
     assert(!passOrbPress(true, true, true, true));
+    // v2.95: orb timing alone gates re-timing (no separate alignment toggle). With it
+    // off nothing is ever re-timed; with it on an inside-orb press is, unless it is a
+    // grounded press without the from-the-ground option, a wave press, or inputs are queued.
+    assert(retimeOrbPress(true, true, true, true, true, false, false, false));
+    assert(!retimeOrbPress(true, true, true, true, false, false, false, false)); // timing off: never
+    assert(!retimeOrbPress(true, true, true, false, true, false, false, false)); // needs prediction
+    assert(!retimeOrbPress(false, true, true, true, true, false, false, false)); // releases aren't timed
+    assert(!retimeOrbPress(true, false, true, true, true, false, false, false)); // not inside an orb
+    assert(!retimeOrbPress(true, true, false, true, true, false, false, false)); // keep pending inputs ordered
+    assert(!retimeOrbPress(true, true, true, true, true, true, false, false));  // wave is never orb-timed
+    assert(!retimeOrbPress(true, true, true, true, true, false, true, false));  // ground press, from-ground off
+    assert(retimeOrbPress(true, true, true, true, true, false, true, true));    // ground press, from-ground on
+    // v2.96: an orb the player clicked is never skipped. Airborne early presses are
+    // always preserved onto their orb; ground presses only when the jump dies or the
+    // orb is already on you; and the longest-living orb activation is used even when
+    // it dies sooner than missing the orb would (that death is the next input's
+    // problem) - except for ship, which keeps the stricter old rule.
+    assert(preserveOrbPress(true, false, false, false));
+    assert(!preserveOrbPress(false, true, false, false)); // working ground jump stays a jump
+    assert(preserveOrbPress(false, true, true, false));   // ... unless the jump dies
+    assert(preserveOrbPress(false, true, false, true));   // ... or the orb is already on you
+    assert(useOrbFallback(false, 130, 130, 40, 90));      // dies sooner than missing it: still clicked
+    assert(useOrbFallback(false, 50, 130, 10, 90));       // press now dies anyway
+    assert(!useOrbFallback(true, 130, 130, 40, 90));      // ship feather that works is left alone
+    assert(useOrbFallback(true, 50, 130, 10, 90));        // ship press that dies gets the orb
+    assert(useOrbFallback(true, 130, 130, 95, 90));       // ship orb path past the late-crash line
     int orb1 = 1, orb2 = 2;
     assert(sameOrb(&orb1, &orb1));
     assert(!sameOrb(&orb1, &orb2));
