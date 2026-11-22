@@ -1,4 +1,4 @@
-// Click Before Frames v2.94 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
+// Click Before Frames v2.95 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
 // ahead with your input. If the ghost dies, the input is retried with 1..N ticks of
@@ -729,7 +729,18 @@ namespace {
         buf.injecting = false;
     }
 
+    bool ghostOverlapsOrb(PlayerObject* ghost, GameObject* ring) {
+        return ghost && ring && ghost->getObjectRect().intersectsRect(ring->getObjectRect());
+    }
+
+    void pruneGhostOrbContacts(PlayerObject* ghost) {
+        prediction_policy::pruneOrbContacts(ghost->m_touchingRings, [&](CCObject* contact) {
+            return ghostOverlapsOrb(ghost, static_cast<GameObject*>(contact));
+        });
+    }
+
     void pressGhost(PlayerObject* ghost, bool down) {
+        pruneGhostOrbContacts(ghost);
         (ghost == buf.ghost1 ? buf.held1 : buf.held2) = down;
         if (down) {
             ghost->pushButton(PlayerButton::Jump);
@@ -1471,11 +1482,15 @@ namespace {
     }
 
     void advanceGhost(PlayerObject* ghost, float dt) {
+        pruneGhostOrbContacts(ghost);
         ghost->update(dt);
         ghost->updateRotation(dt);
     }
 
     void checkGhost(PlayLayer* layer, PlayerObject* ghost, float dt) {
+        // Expire contacts at the new position before collecting this tick's contacts.
+        // Otherwise a delayed press can activate an orb left many ticks behind.
+        pruneGhostOrbContacts(ghost);
         ghost->m_collisionLogTop->removeAllObjects();
         ghost->m_collisionLogBottom->removeAllObjects();
         ghost->m_collisionLogLeft->removeAllObjects();
@@ -1554,6 +1569,10 @@ namespace {
         if (second) {
             copyState(buf.ghost2, p2);
         }
+        pruneGhostOrbContacts(buf.ghost1);
+        if (second) {
+            pruneGhostOrbContacts(buf.ghost2);
+        }
         // Already-touching rings need not emit playerTouchedRing again. Seed the
         // probe at tick zero, otherwise an inside-orb press can skip alignment entirely.
         for (auto* ghost : { buf.ghost1, second ? buf.ghost2 : nullptr }) {
@@ -1620,6 +1639,10 @@ namespace {
                 placeMovers(tick + 1);  // where they'll be after this step
             }
             buf.simTick = tick;
+            pruneGhostOrbContacts(buf.ghost1);
+            if (second) {
+                pruneGhostOrbContacts(buf.ghost2);
+            }
             // v2.26: orb auto-clicks that wait a few ticks into the orb fire here, if the
             // ghost is still inside an orb by then.
             if (buf.autoAt1 >= 0 && tick >= buf.autoAt1) {
@@ -1699,8 +1722,9 @@ namespace {
             if (second) {
                 upside2 = buf.ghost2->m_isUpsideDown;
             }
-            if (buf.ghost1->m_touchingRings->count() > 0 || (second && buf.ghost2->m_touchingRings->count() > 0)) {
-                buf.lastOrbTick = tick;  // v2.82: still inside an orb at this tick
+            if (buf.firstOrb && (buf.ghost1->m_touchingRings->containsObject(buf.firstOrb) ||
+                (second && buf.ghost2->m_touchingRings->containsObject(buf.firstOrb)))) {
+                buf.lastOrbTick = tick;  // only the target orb, not another orb in a chain
             }
             if (shipRun) {
                 if (p1->m_isShip) {
@@ -4138,6 +4162,11 @@ namespace {
             buf.queue.pop_front();
             buf.releaseShift = down ? buf.shift : 0;
             if (down != buf.appliedInput) {
+                if (buf.explain) {
+                    say("deliver buffered {}: real player at ({:.1f}, {:.1f}), {} ring contacts", down ? "press" : "release",
+                        player->getPosition().x, player->getPosition().y,
+                        player->m_touchingRings ? player->m_touchingRings->count() : 0);
+                }
                 sendButton(layer, down);
             }
         }
@@ -5003,7 +5032,7 @@ class $modify(BufPlayerObject, PlayerObject) {
             if (!buf.smart || !isGhost(this)) {
                 return;
             }
-            if (buf.orbsUsed.contains(ring)) {
+            if (buf.orbsUsed.contains(ring) || !ghostOverlapsOrb(this, ring)) {
                 return;
             }
             snapshotObject(ring);
@@ -5028,6 +5057,10 @@ class $modify(BufPlayerObject, PlayerObject) {
     // Dash orbs don't go through ringJump.
     void startDashing(DashRingObject* ring) {
         if (buf.simulating && isGhost(this)) {
+            if (!ghostOverlapsOrb(this, ring)) {
+                return;
+            }
+            snapshotObject(ring);
             buf.orbsUsed.insert(ring);
             if (buf.orbUsedTick < 0) {
                 buf.orbUsedTick = buf.simTick;

@@ -16,6 +16,19 @@ namespace prediction_policy {
         return target && target == used;
     }
 
+    // The engine's touching-ring list can retain a ring after the player has
+    // moved away. A standalone ghost step must expire those contacts itself.
+    // Iterate backwards because removing a contact shifts the remaining entries.
+    template <typename Contacts, typename Overlaps>
+    void pruneOrbContacts(Contacts* contacts, Overlaps overlaps) {
+        if (!contacts) return;
+        for (auto i = contacts->count(); i > 0; --i) {
+            if (!overlaps(contacts->objectAtIndex(i - 1))) {
+                contacts->removeObjectAtIndex(i - 1);
+            }
+        }
+    }
+
     // Survival alone is not evidence that this press clicked its intended orb.
     // A held input activating something much later must not excuse a missed click.
     constexpr bool orbActivatedByPress(bool sameTarget, int usedTick, int pressTick, int grace) {

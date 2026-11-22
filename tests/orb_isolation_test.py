@@ -69,6 +69,16 @@ class OrbIsolationTest(unittest.TestCase):
         self.assertIn('objectAtIndex(0)', seed)
         self.assertIn('for (; tick < total;', rest)
 
+    def test_stale_contacts_cannot_activate_orb(self):
+        press = SOURCE.split('    void pressGhost(', 1)[1].split('    void snapshotObject', 1)[0]
+        self.assertLess(press.index('pruneGhostOrbContacts(ghost);'),
+                        press.index('ghost->pushButton'))
+        ring = SOURCE.split('    void ringJump(', 1)[1].split('// Dash orbs', 1)[0]
+        self.assertIn('!ghostOverlapsOrb(this, ring)', ring)
+        dash = SOURCE.split('    void startDashing(', 1)[1].split('// Shortcuts', 1)[0]
+        self.assertIn('!ghostOverlapsOrb(this, ring)', dash)
+        self.assertIn('m_touchingRings->containsObject(buf.firstOrb)', SOURCE)
+
     def test_no_better_timing_still_passes_original_click(self):
         fallback = SOURCE.split('            if (orbRetime || buf.orbWasTiming || (orbTargetFound && !grounded)) {', 1)[1]
         fallback = fallback.split('\n        buf.sawMover', 1)[0]
