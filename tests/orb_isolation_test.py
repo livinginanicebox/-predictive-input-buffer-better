@@ -35,6 +35,25 @@ class OrbIsolationTest(unittest.TestCase):
         self.assertNotIn('buf.orbAlignGround', retime)
         self.assertNotIn('m_isOnGround', retime)
 
+    def test_wave_orb_presses_are_not_excluded(self):
+        retime = SOURCE.split('        bool orbRetime = ', 1)[1].split(';', 1)[0]
+        self.assertNotIn('m_isDart', retime)
+        self.assertIn('if (down && buf.orbAlign && buf.smart)', SOURCE)
+
+    def test_tick_zero_press_has_real_touching_rings(self):
+        copy = SOURCE.split('    void copyState(', 1)[1].split(
+            '        // Preserve both axes:', 1)[0]
+        self.assertIn('addObjectsFromArray(real->m_touchingRings)', copy)
+        self.assertIn('snapshotObject(', copy)
+
+    def test_wave_does_not_assume_additional_orb_presses(self):
+        wrapper = SOURCE.split('    int simulateOrbs(', 1)[1].split(
+            '        buf.touchedOrb = false;', 1)[0]
+        self.assertIn('p1->m_isDart', wrapper)
+        self.assertLess(wrapper.index('buf.orbClick = false;'),
+                        wrapper.index('int ret = simulate('))
+        self.assertIn('buf.orbClick = previousOrbClick;', wrapper)
+
     def test_no_better_timing_still_passes_original_click(self):
         fallback = SOURCE.split('            if (orbRetime || buf.orbWasTiming) {', 1)[1]
         fallback = fallback.split('\n        buf.sawMover', 1)[0]

@@ -116,7 +116,7 @@
 		"orb-align": {
 			"type": "bool",
 			"name": "Orb alignment",
-			"description": "If an airborne press misses the first orb ahead, hold it until that same orb can be activated. Fully safe timings are preferred, but an orb-activating timing can be used even if no safe path is predicted. A press already touching an orb passes through unchanged, unless 'Orb timing' is on and another tick inside that orb survives longer. Works for every mode except ship and wave. Needs 'Orb / pad / portal prediction'.",
+			"description": "If an airborne press misses the first orb ahead, hold it until that same orb can be activated. Fully safe timings are preferred, but an orb-activating timing can be used even if no safe path is predicted. A press already touching an orb passes through unchanged, unless 'Orb timing' is on and another tick inside that orb survives longer. Works in every mode, including ship and wave. Needs 'Orb / pad / portal prediction'.",
 			"default": true
 		},
 		"orb-align-ticks": {
@@ -202,7 +202,7 @@
 		"orb-timing": {
 			"type": "bool",
 			"name": "Orb timing",
-			"description": "For frame-perfect orbs, retry timings while passing through the same orb. v2.94: covers ship orb clicks too. A press made while already inside an orb counts as safe only if it also survives with you half a tick ahead of and behind (see 'Robust saves'). Otherwise every tick of the pass through the same orb is tried: a tick that clears the look-ahead wins, and when your click does not clear it any tick that lives longer is used as well. An early press in front of an orb that has nothing above or below it is still held onto the orb (the orb path has to live past the late-crash line), instead of being applied where it misses the orb - that was the \"some orbs are just skipped\" case. It never picks the last tick you are still touching the orb on. Needs 'Orb alignment' and 'Orb / pad / portal prediction'.",
+			"description": "For frame-perfect orbs, retry timings while passing through the same orb. Covers ship and wave orb clicks too. A press made while already inside an orb counts as safe only if it also survives with you half a tick ahead of and behind (see 'Robust saves'). Otherwise every tick of the pass through the same orb is tried: a tick that clears the look-ahead wins, and when your click does not clear it any tick that lives longer is used as well. An early press in front of an orb that has nothing above or below it is still held onto the orb (the orb path has to live past the late-crash line), instead of being applied where it misses the orb - that was the \"some orbs are just skipped\" case. It never picks the last tick you are still touching the orb on. Needs 'Orb alignment' and 'Orb / pad / portal prediction'.",
 			"default": true
 		},
 		"cube-late-crash": {

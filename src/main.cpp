@@ -739,10 +739,22 @@ namespace {
         }
     }
 
+    void snapshotObject(GameObject* object);
+
     void copyState(PlayerObject* ghost, PlayerObject* real) {
         ghost->setVisible(false);
         ghost->resetTouchedRings(true);
         ghost->copyAttributes(real);
+        // A tick-zero press must see the same rings as the real player. Waiting
+        // for the next collision check moves the click a tick late and makes
+        // every inside-orb candidate look as if it missed the orb.
+        if (ghost->m_touchingRings && real->m_touchingRings) {
+            ghost->m_touchingRings->removeAllObjects();
+            ghost->m_touchingRings->addObjectsFromArray(real->m_touchingRings);
+            for (unsigned int i = 0; i < real->m_touchingRings->count(); ++i) {
+                snapshotObject(static_cast<GameObject*>(real->m_touchingRings->objectAtIndex(i)));
+            }
+        }
         // Preserve both axes: a mirrored or inverted sprite need not have uniform scale.
         ghost->setScaleX(real->getScaleX());
         ghost->setScaleY(real->getScaleY());
@@ -1793,6 +1805,15 @@ namespace {
     // like a player who only clicks the orb when they need it.
     int simulateOrbs(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, int delay, bool down, int horizon, int releaseAfter,
         int stopAt, SimEnd* end) {
+        // Wave releases must be judged using actual inputs, not an invented
+        // re-press on a blue orb that flips gravity and hides an early release.
+        if (p1->m_isDart || (dual && p2 && p2->m_isDart)) {
+            bool previousOrbClick = buf.orbClick;
+            buf.orbClick = false;
+            int ret = simulate(layer, p1, p2, dual, delay, down, horizon, releaseAfter, stopAt, end);
+            buf.orbClick = previousOrbClick;
+            return ret;
+        }
         buf.orbClick = buf.assumeOrbs;
         buf.touchedOrb = false;
         int first = simulate(layer, p1, p2, dual, delay, down, horizon, releaseAfter, stopAt, end);
@@ -2319,7 +2340,13 @@ namespace {
         if (ret >= target || *end == SimEnd::StopSearch) {
             return ret;
         }
-        bool strict = prediction_policy::strictWaveRecovery(prediction_policy::invertedWave(p1, p2, dual), buf.waveGravityChanged);
+        bool inverted = prediction_policy::invertedWave(p1, p2, dual);
+        // After a gravity flip, do not excuse an early release with an imaginary
+        // future press. Search the release delay itself so the hold is extended.
+        if (!prediction_policy::allowWaveRecovery(down, inverted, buf.waveGravityChanged)) {
+            return ret;
+        }
+        bool strict = prediction_policy::strictWaveRecovery(inverted, buf.waveGravityChanged);
         // Apply inverted-wave recovery rules to a predicted gravity transition too,
         // even if the real player was upright at the beginning of the prediction.
         int minimumTurn = prediction_policy::waveMinimumTurn(strict, st(WAVE_MIN_TURN), st(12));
@@ -3381,8 +3408,7 @@ namespace {
         // when a tick inside the same orb lives longer (see the fallback below).
         // v2.94: ship included - a ship orb click was never checked or re-timed, so frame
         // perfect ship orb clicks (the whole point of ship buffering) were passed through.
-        bool orbRetime = down && touchingOrb && buf.queue.empty() && buf.smart && buf.orbAlign && buf.orbTiming &&
-            !p1->m_isDart && !(p2 && p2->m_isDart);
+        bool orbRetime = down && touchingOrb && buf.queue.empty() && buf.smart && buf.orbAlign && buf.orbTiming;
         // "Also from the ground" controls converting jumps into future orb clicks,
         // not timing a press that is already touching an orb.
         if (prediction_policy::passOrbPress(down, touchingOrb, buf.queue.empty(), orbRetime)) {
@@ -3566,7 +3592,7 @@ namespace {
         // is a death first, so a press that jumps fine is never turned into an orb hit.
         // v2.94: ship presses go through orb alignment too (ship orb clicks used to be
         // excluded here, so an early ship orb click was never moved onto the orb).
-        if (down && !anyWave && buf.orbAlign && buf.smart) {
+        if (down && buf.orbAlign && buf.smart) {
             auto isCubeMode = [](PlayerObject* p) {
                 return p && !p->m_isShip && !p->m_isDart && !p->m_isBird && !p->m_isBall && !p->m_isRobot && !p->m_isSpider &&
                     !p->m_isSwing;

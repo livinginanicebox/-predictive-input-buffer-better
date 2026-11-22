@@ -41,6 +41,11 @@ int main() {
     assert(waveMinimumTurn(true, 6, 12) == 12);
     assert(waveEscape(false, 16, 24) == 16);
     assert(waveEscape(true, 16, 24) == 24);
+    assert(allowWaveRecovery(false, false, false));
+    assert(!allowWaveRecovery(false, true, false)); // release after blue orb
+    assert(!allowWaveRecovery(false, false, true)); // flip during prediction
+    assert(!allowWaveRecovery(false, true, true));
+    assert(allowWaveRecovery(true, true, true)); // presses keep normal recovery
     assert(!strictWaveRecovery(false, false));
     assert(strictWaveRecovery(true, false));
     assert(strictWaveRecovery(false, true));

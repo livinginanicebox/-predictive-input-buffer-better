@@ -30,6 +30,12 @@ namespace prediction_policy {
         return invertedWave ? std::min(configuredGap, invertedGap) : configuredGap;
     }
 
+    // An inverted / gravity-changing release must work without a hypothetical
+    // re-press. Otherwise an early blue-orb release is labelled safe and never buffered.
+    constexpr bool allowWaveRecovery(bool down, bool startedInverted, bool gravityChanged) {
+        return down || !(startedInverted || gravityChanged);
+    }
+
     constexpr bool strictWaveRecovery(bool startedInverted, bool gravityChanged) {
         return startedInverted || gravityChanged;
     }
