@@ -16,6 +16,15 @@ int main() {
     assert(!passOrbPress(true, true, false, false)); // keep pending inputs ordered
     // v2.86 "orb timing": a press inside an orb is re-timed instead of passed through.
     assert(!passOrbPress(true, true, true, true));
+    // A surviving ghost that misses the orb is NOT a successful click.
+    assert(!orbActivatedByPress(false, -1, 0, 2));
+    assert(!orbActivatedByPress(true, -1, 0, 2));
+    assert(!orbActivatedByPress(true, 20, 0, 2)); // held into it much later
+    assert(!orbActivatedByPress(false, 0, 0, 2)); // wrong orb
+    assert(orbActivatedByPress(true, 0, 0, 2));
+    assert(orbActivatedByPress(true, 2, 0, 2));
+    assert(orbActivatedByPress(true, 9, 8, 2)); // confirmed buffered activation
+    assert(!orbActivatedByPress(true, 7, 8, 2)); // orb fired before this press
     int orb1 = 1, orb2 = 2;
     assert(sameOrb(&orb1, &orb1));
     assert(!sameOrb(&orb1, &orb2));

@@ -16,6 +16,12 @@ namespace prediction_policy {
         return target && target == used;
     }
 
+    // Survival alone is not evidence that this press clicked its intended orb.
+    // A held input activating something much later must not excuse a missed click.
+    constexpr bool orbActivatedByPress(bool sameTarget, int usedTick, int pressTick, int grace) {
+        return sameTarget && usedTick >= pressTick && usedTick - pressTick <= grace;
+    }
+
     constexpr bool betterOrbFallback(bool enabled, bool sameTarget, int survival, int bestSurvival) {
         return enabled && sameTarget && survival > bestSurvival;
     }

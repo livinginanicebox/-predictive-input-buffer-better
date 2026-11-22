@@ -1554,6 +1554,15 @@ namespace {
         if (second) {
             copyState(buf.ghost2, p2);
         }
+        // Already-touching rings need not emit playerTouchedRing again. Seed the
+        // probe at tick zero, otherwise an inside-orb press can skip alignment entirely.
+        for (auto* ghost : { buf.ghost1, second ? buf.ghost2 : nullptr }) {
+            if (ghost && ghost->m_touchingRings && ghost->m_touchingRings->count() > 0 && !buf.firstOrb) {
+                buf.firstOrb = static_cast<GameObject*>(ghost->m_touchingRings->objectAtIndex(0));
+                buf.firstOrbTick = 0;
+                buf.lastOrbTick = 0;
+            }
+        }
         buf.held1 = buf.held2 = buf.appliedInput;
         buf.auto1 = buf.auto2 = false;
         buf.autoAt1 = buf.autoAt2 = -1;
@@ -1986,8 +1995,9 @@ namespace {
     // Prefer a fully safe timing. For an early airborne press, fall back to an
     // activation of that same orb even if the predicted path later crashes.
     int alignOrb(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, int horizon, int releaseAfter, int learned, int* landed,
-        bool fullOnly, bool preferOrb, bool groundPress, bool& originalOrbUsed, bool shipAlign = false) {
+        bool fullOnly, bool preferOrb, bool groundPress, bool& originalOrbUsed, bool& orbTargetFound, bool shipAlign = false) {
         originalOrbUsed = false;
+        orbTargetFound = false;
         buf.orbWasGround = false;
         int window = st(std::clamp(buf.orbWindow, 1, MAX_TICKS));
         int found = 0;
@@ -2020,6 +2030,11 @@ namespace {
         int touch = buf.firstOrbTick;
         int lastTouch = buf.lastOrbTick;
         GameObject* targetOrb = buf.firstOrb;
+        orbTargetFound = targetOrb && touch >= 0;
+        auto activatedByPress = [&](int k) {
+            return prediction_policy::orbActivatedByPress(
+                prediction_policy::sameOrb(targetOrb, buf.usedOrb), buf.orbUsedTick, k, st(2));
+        };
         // v2.82: candidate presses span the whole pass through the orb (the no-press
         // probe saw exactly how long you're inside it), not just the first 6 ticks
         // (1.5f). A frame-perfect orb usually has to be clicked deep inside it.
@@ -2035,16 +2050,14 @@ namespace {
         // Used both to decide whether the click you made is really safe - not just at the exact
         // predicted spot - and to pick a re-timed tick that is.
         float orbShift = std::max(0.3f, 0.5f * (311.58f / 240.f) * (std::abs(p1->m_playerSpeed) / 0.9f));
-        // v2.92: `sameOrb` is only required when picking a re-timed tick. For "is the click you
-        // made safe", the shifted ghost is 0.6px away and may legitimately touch the orb a tick
-        // earlier or later - what matters is that it survives, not which orb it used. Requiring the
-        // same orb there made almost every click "fragile" and sent it down the re-time path.
-        auto holdsUp = [&](int k, int need, bool sameOrb = true) {
+        // Both the nominal and shifted runs must activate the intended orb at
+        // this press, not merely survive while missing it or hit another orb later.
+        auto holdsUp = [&](int k, int need) {
             for (float off : { orbShift, -orbShift }) {
                 buf.ghostShiftX = off;
                 SimEnd e;
                 int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &e);
-                bool ok = ret >= need && (!sameOrb || prediction_policy::sameOrb(targetOrb, buf.usedOrb));
+                bool ok = ret >= need && activatedByPress(k);
                 buf.ghostShiftX = 0.f;
                 if (!ok) {
                     return false;
@@ -2057,18 +2070,9 @@ namespace {
             // 2. Pressing now already uses an orb (e.g. held into it).
             int now = simulate(layer, p1, p2, dual, 0, true, horizon, releaseAfter, horizon, &end);
             buf.orbNowRet = now;
-            // v2.94: a ship press that already survives is NEVER moved. Holding a feather back to
-            // catch an orb would change the ship's line for those ticks - ship orb clicks are
-            // aligned only when the press as made is not safe (then the orb is what saves it).
-            if (prediction_policy::leaveSafeInput(shipAlign, now >= horizon) && !(buf.orbUsedTick >= 0 && buf.orbUsedTick <= st(2))) {
-                buf.orbClick = buf.assumeOrbs;
-                return 0;
-            }
-            // v2.87: "this press uses an orb" means it activates one right now - not that the
-            // held player happens to pass through an orb many ticks later (that press is not an
-            // orb click, and re-timing it was a waste of the budget). A press that activates an
-            // orb and already survives the look-ahead counts too: a working click is left alone.
-            bool nowUses = (buf.orbUsedTick >= 0 && buf.orbUsedTick <= st(2)) || (buf.orbUsedTick >= 0 && now >= horizon);
+            // Do not call a missed orb "safe" just because the ghost survives.
+            // In particular, an orb used later while holding is not this click.
+            bool nowUses = activatedByPress(0);
             // If the player's actual timing already activates an orb, never change
             // that decision just because a prediction dislikes the resulting path.
             // v2.86: with "Orb timing" on, a press inside the orb whose path does NOT
@@ -2085,7 +2089,7 @@ namespace {
                 // v2.94: ship orb clicks keep their timing too (same rule as ship presses): a
                 // straight-fly feather into an orb that works is not retimed for a fraction of a
                 // tick, which only moved the ship off its line.
-                if (nowSafe && buf.robustSaves && !shipAlign && clickMs() < buf.budgetMs && !holdsUp(0, horizon, false)) {
+                if (nowSafe && buf.robustSaves && !shipAlign && clickMs() < buf.budgetMs && !holdsUp(0, horizon)) {
                     nowSafe = false;
                     if (buf.explain) {
                         trace += " (safe only at the exact spot)";
@@ -2126,7 +2130,7 @@ namespace {
             // Learned timings are valid only for the specific first orb ahead.
             if (targetOrb && learned > 0 && learned <= window) {
                 int ret = simulate(layer, p1, p2, dual, learned, true, horizon, releaseAfter, horizon, &end);
-                if (prediction_policy::sameOrb(targetOrb, buf.usedOrb) && ret >= horizon) {
+                if (activatedByPress(learned) && ret >= horizon) {
                     *landed = ret;
                     buf.orbClick = buf.assumeOrbs;
                     return learned;
@@ -2149,7 +2153,7 @@ namespace {
                         break;
                     }
                     int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &end);
-                    bool uses = prediction_policy::sameOrb(targetOrb, buf.usedOrb);
+                    bool uses = activatedByPress(k);
                     if (buf.explain) {
                         trace += fmt::format(" +{}:{}{}", k, ret, uses ? "o" : "-");
                     }
@@ -2249,19 +2253,11 @@ namespace {
                     }
                 }
                 else if (!retimingOrb && found == 0 && fallbackK > 0) {
-                    // v2.86: an airborne press that misses the orb may still fall back to an
-                    // activation of it even when no path is safe. That fallback is never used to
-                    // move a click that already used the orb.
-                    // v2.94: an orb with nothing above or below it used to be skipped entirely:
-                    // pressing now is "safe" (nothing to crash into), no tick inside the orb is
-                    // fully safe either, so the press was applied where it was and never hit the
-                    // orb. An airborne / ship press in front of an orb is that orb's click, so it
-                    // is still held onto it when the orb path lives long enough for the crash to
-                    // clearly be the NEXT obstacle (the same late-crash line best-effort saves use).
-                    if (now < horizon || fallbackRet >= st(buf.lateCrash) || fallbackRet >= now) {
-                        found = fallbackK;
-                        *landed = fallbackRet;
-                    }
+                    // An airborne press that misses has explicit orb intent. A
+                    // confirmed activation beats surviving while skipping that orb;
+                    // a later obstacle must not veto the requested activation.
+                    found = fallbackK;
+                    *landed = fallbackRet;
                 }
             }
             // "+k:ret o" means the press uses the intended orb and lives ret ticks.
@@ -2282,7 +2278,7 @@ namespace {
                     break;
                 }
                 int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &end);
-                bool uses = prediction_policy::sameOrb(targetOrb, buf.usedOrb);
+                bool uses = activatedByPress(k);
                 if (buf.explain) {
                     trace += fmt::format(" +{}:{}{}", k, ret, uses ? "o" : "-");
                 }
@@ -3603,13 +3599,14 @@ namespace {
             bool fullOnlyAlign = cubeOnly || anyRobot || anyShip;  // v2.84: robot gets cube's rule
             int orbLanded = 0;
             bool originalOrbUsed = false;
-            // Previously failed saves should not permanently block an airborne orb
-            // press: the player may still want that orb despite a predicted death.
-            int k = memorySaysSkip(sliceOf(p1)) && grounded
-                ? 0
-                : alignOrb(layer, p1, p2, dual, horizon, releaseAfter, memoryDelay(sliceOf(p1)), &orbLanded, fullOnlyAlign, !grounded, grounded,
-                      originalOrbUsed, anyShip);
+            bool orbTargetFound = false;
+            // Failed jump saves in level memory must not bypass an explicit orb search.
+            int k = alignOrb(layer, p1, p2, dual, horizon, releaseAfter, memoryDelay(sliceOf(p1)), &orbLanded,
+                fullOnlyAlign, !grounded, grounded, originalOrbUsed, orbTargetFound, anyShip);
             if (originalOrbUsed) {
+                if (buf.explain) {
+                    say("orb: original press predicted to activate the target; timing unchanged");
+                }
                 buf.appliedInput = down;
                 return false;
             }
@@ -3639,13 +3636,11 @@ namespace {
                 queueInput(k - early, down);
                 return true;
             }
-            if (orbRetime || buf.orbWasTiming) {
-                // v2.86: no tick inside the orb is a real save over the click you just made, so
-                // the press reaches the game exactly as before (your timing, no safety veto).
+            if (orbRetime || buf.orbWasTiming || (orbTargetFound && !grounded)) {
+                // No candidate was selected. Forward the input as a fallback, but
+                // never run a generic survival test and label a missed orb "safe".
                 buf.appliedInput = down;
-                if (buf.explain) {
-                    say("orb timing: no tick inside the orb lives longer than your click ({}t)", buf.orbNowRet);
-                }
+                say("orb: no activation improvement found in the search window; forwarding original input (orb hit not confirmed)");
                 return false;
             }
         }

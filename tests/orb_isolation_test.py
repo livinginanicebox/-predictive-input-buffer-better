@@ -54,11 +54,27 @@ class OrbIsolationTest(unittest.TestCase):
                         wrapper.index('int ret = simulate('))
         self.assertIn('buf.orbClick = previousOrbClick;', wrapper)
 
+    def test_safe_original_requires_target_activation(self):
+        align = SOURCE.split('    int alignOrb(', 1)[1].split(
+            '    // v2.1: best delayed run', 1)[0]
+        self.assertIn('bool nowUses = activatedByPress(0);', align)
+        self.assertIn('ret >= need && activatedByPress(k)', align)
+        self.assertNotIn('holdsUp(0, horizon, false)', align)
+        self.assertNotIn('leaveSafeInput(shipAlign', align)
+
+    def test_probe_sees_already_touching_orb_without_callback(self):
+        sim = SOURCE.split('        // Already-touching rings need not emit', 1)[1]
+        seed, rest = sim.split('        buf.held1 = buf.held2', 1)
+        self.assertIn('buf.firstOrbTick = 0;', seed)
+        self.assertIn('objectAtIndex(0)', seed)
+        self.assertIn('for (; tick < total;', rest)
+
     def test_no_better_timing_still_passes_original_click(self):
-        fallback = SOURCE.split('            if (orbRetime || buf.orbWasTiming) {', 1)[1]
+        fallback = SOURCE.split('            if (orbRetime || buf.orbWasTiming || (orbTargetFound && !grounded)) {', 1)[1]
         fallback = fallback.split('\n        buf.sawMover', 1)[0]
         self.assertIn('buf.appliedInput = down;', fallback)
         self.assertIn('return false;', fallback)
+        self.assertIn('orb hit not confirmed', fallback)
 
 
 if __name__ == '__main__':
