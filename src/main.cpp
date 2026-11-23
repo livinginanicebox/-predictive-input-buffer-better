@@ -1,4 +1,4 @@
-// Click Before Frames v2.94 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
+// Click Before Frames v2.95 (dual mode buffered for both players + asymmetrical duals)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
 // ahead with your input. If the ghost dies, the input is retried with 1..N ticks of
@@ -20,6 +20,7 @@
 #include "prediction_policy.hpp"
 #include "wave_rescue_policy.hpp"
 #include "menu_shortcut.hpp"
+#include "dual_buffer.hpp"
 #include <Geode/Geode.hpp>
 #include <Geode/modify/CCCircleWave.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
@@ -37,6 +38,7 @@
 #include <Geode/modify/RingObject.hpp>
 #include <Windows.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -157,6 +159,25 @@ namespace {
         bool down;
     };
 
+    // v2.95: per-player input state. Dual mode runs two players with independent rhythms,
+    // so the queue, the delay shift, the hold state and the spam streak are each player's
+    // own. Symmetrical duals press together (the two queues/shifts stay in sync because
+    // both inputs arrive together and get the same delay); asymmetrical duals act
+    // independently, which is exactly what this splits apart.
+    struct PlayerInput {
+        std::deque<QueuedInput> queue;
+        int shift = 0;              // delay applied to inputs while the queue is active
+        int releaseShift = 0;       // v2.1: delay of the last delivered press, reused for its release
+        bool appliedInput = false;  // what the game currently has held
+        bool realInput = false;     // what the real player is really holding
+        bool autoReleased = false;  // the game let go for you (wave / robot / dash)
+        bool autoDash = false;      // v2.16: the auto-release ended a dash
+        int sinceInput = 999;
+        int rapid = 0;
+        int shipTapStreak = 0;
+        bool lastShipTapDown = false;
+    };
+
     struct ObjSnapshot {
         GameObject* object;
         bool isActivated;
@@ -202,28 +223,24 @@ namespace {
         bool waveGravityChanged = false; // the current/best ghost run crossed a flip
         bool secondInputFired = false; // a simulated follow-up actually occurred
         bool rejectPortalSafety = false; // queued-turn checks must reach the second input
-        bool realInput = false;
-        bool appliedInput = false;
-        bool isPlayer1 = true;
+        // v2.95: the two players' pending-input state (queue / shift / hold state / spam
+        // streak). In dual mode each player is buffered independently.
+        PlayerInput input1;  // Player 1 (side 1)
+        PlayerInput input2;  // Player 2 (side 2)
+        bool pressPlayer1 = true;  // which player the current decision acts on (ghost 1 = that player)
 
         bool enabled = true;
         int stage = 0;
         int ticksAll = 2;
         int ticksWave = 2;
 
-        std::deque<QueuedInput> queue;
-        int shift = 0;  // delay applied to inputs while the queue is active
-
         float tickLength = TICK;
-        int sinceInput = 999;
-        int rapid = 0;
 
         bool smart = true;
         bool console = false;
         double budgetMs = 6.0;
         bool practiceOnly = true;    // v2.1: only buffer in practice mode
         int groundHorizon = 130;     // v2.1: how far ahead cube/ball/spider predictions look
-        int releaseShift = 0;        // v2.1: delay of the last delivered press, reused for its release
         int waveHorizon = 65;        // v2.2: how far ahead wave predictions look (mini = 15 less)
         int flyerHorizon = 80;       // v2.81: ship / UFO / swing look-ahead (was fixed at 48t = 12f)
         bool assumeOrbs = true;      // v2.2: the ghost clicks every orb it touches ("calculation mode")
@@ -245,7 +262,6 @@ namespace {
         bool trackMovers = false;    // v2.5.1: watch objects only in this run (not in every search run)
         bool autoRelease = false;    // v2.4: wave auto-release (practice mode only)
         int autoWindow = 6;          // v2.4: hold must die within this many ticks to auto-release
-        bool autoReleased = false;   // v2.4: we released for you; your real release is swallowed
         int spamGap = 16;            // v2.5.2: inputs closer than this (ticks) count toward wave spam
         bool waveMargin = true;      // v2.10: center wave saves in the safe window (1 tick of room)
         bool waveV46 = false;        // v2.7: use the old v4.6 wave rules instead of the cube-style ones
@@ -276,9 +292,7 @@ namespace {
         bool predictMovers = false;  // v2.27: move objects along their current motion during predictions
         bool shipBuffer = false;     // v2.25: buffer ship inputs too
         int shipSpamGap = 6;         // v2.44: ship feathering is normal control, only taps closer than this are spam
-        int shipTapStreak = 0;       // v2.84: alternating ship taps in a row (straight-fly rhythm)
-        bool lastShipTapDown = false;  // v2.84: direction of the last ship tap in that rhythm
-        bool shipStraight = false;   // v2.84: this click is part of a straight-fly rhythm
+        bool shipStraight = false;   // v2.84: this click is part of a straight-fly rhythm (acting player)
         float runYRange = 0.f;       // v2.84: vertical travel (max-min y) of the current ship run
         bool perfLog = false;        // v2.21: log time / runs / ghost ticks per click
         int simRuns = 0;             // v2.21: predictions run for the current click
@@ -289,7 +303,6 @@ namespace {
         float tickStartX = 0.f;      // v2.18: P1's x at the start of the current tick
         float tickDx = 0.f;          // v2.18: how far P1 moved in the last full tick
         bool dashAutoRelease = false;  // v2.16: let go of a dash for you when it would crash
-        bool autoDash = false;       // v2.16: the current auto-release ended a dash
         std::unordered_set<GameObject*> orbsUsed;  // v2.16: orbs the ghost actually used this run
         bool moreTime = true;        // v2.43: at spots you keep dying, delay to give you more time
         bool ballSmart = true;       // v2.45: ball landing rules + spam guard
@@ -460,9 +473,13 @@ namespace {
     }
 
     void resetPending() {
-        buf.queue.clear();
-        buf.shift = 0;
-        buf.releaseShift = 0;
+        // v2.95: both players (dual mode) go back to a clean slate.
+        buf.input1.queue.clear();
+        buf.input1.shift = 0;
+        buf.input1.releaseShift = 0;
+        buf.input2.queue.clear();
+        buf.input2.shift = 0;
+        buf.input2.releaseShift = 0;
     }
 
     // v2.75: "F6", "G", "7", "None" -> key code (0 = unbound)
@@ -679,8 +696,10 @@ namespace {
         buf.pathNode = nullptr;
         buf.simulating = false;
         buf.injecting = false;
-        buf.rapid = 0;
-        buf.autoReleased = false;
+        buf.input1.rapid = 0;
+        buf.input2.rapid = 0;
+        buf.input1.autoReleased = false;
+        buf.input2.autoReleased = false;
         buf.recordPath = nullptr;
         watched.clear();
         drift.active = false;
@@ -722,10 +741,10 @@ namespace {
         }
     }
 
-    void sendButton(PlayLayer* layer, bool down) {
+    void sendButton(PlayLayer* layer, bool down, bool actsOnPlayer1 = true) {
         buf.injecting = true;
-        buf.appliedInput = down;
-        layer->handleButton(down, 1, buf.isPlayer1);
+        (actsOnPlayer1 ? buf.input1 : buf.input2).appliedInput = down;
+        layer->handleButton(down, 1, actsOnPlayer1);
         buf.injecting = false;
     }
 
@@ -928,12 +947,14 @@ namespace {
         }
     };
 
-    HoldStats tapHold, robotHold;
+    std::array<HoldStats, 2> tapHold, robotHold;   // per acting player: side 1 / side 2
     int tickCount = 0;
 
     enum class InputKind { Tap, Wave, Robot, Other };
-    int pressTick = -1;
-    InputKind pressKind = InputKind::Other;
+    // v2.95: press tracking is per player - P1 and P2 in a dual level never share an
+    // in-flight press (otherwise release lengths mix across players).
+    int pressTick[2] = { -1, -1 };
+    InputKind pressKind[2] = { InputKind::Other, InputKind::Other };
 
     // Cube / ball / ufo / spider / swing are tapped. Ship, wave and robot are held, and
     // each keeps its own samples so long holds don't pollute the cube's tap length.
@@ -947,34 +968,36 @@ namespace {
         return p->m_isRobot ? InputKind::Robot : InputKind::Tap;
     }
 
-    void recordRealInput(bool down, PlayerObject* p1) {
+    void recordRealInput(bool down, PlayerObject* p1, PlayerInput& in, int who) {
         if (down) {
-            pressTick = tickCount;
-            pressKind = kindOf(p1);
+            pressTick[who] = tickCount;
+            pressKind[who] = kindOf(p1);
             return;
         }
-        if (pressTick < 0) {
+        if (pressTick[who] < 0) {
             return;
         }
-        int held = tickCount - pressTick;
-        pressTick = -1;
-        if (buf.autoReleased) {
+        int held = tickCount - pressTick[who];
+        auto kind = pressKind[who];
+        pressTick[who] = -1;
+        if (in.autoReleased) {
             return;  // the game already let go earlier; this length isn't a real hold
         }
-        switch (pressKind) {
-            case InputKind::Tap: tapHold.add(held); break;
-            case InputKind::Robot: robotHold.add(held); break;
+        switch (kind) {
+            case InputKind::Tap: tapHold[who].add(held); break;
+            case InputKind::Robot: robotHold[who].add(held); break;
             default: break;
         }
     }
 
     // A hold that spans a death / restart / new level isn't a real tap length.
     void forgetPress() {
-        pressTick = -1;
+        pressTick[0] = -1;
+        pressTick[1] = -1;
     }
 
-    int holdEstimate() {
-        return tapHold.pick(st(12), 50);  // ~50 ms, a typical tap
+    int holdEstimate(int who) {
+        return tapHold[who].pick(st(12), 50);  // ~50 ms, a typical tap
     }
 
     // v2.4 moving-object guard: objects the ghost collided with are watched every tick,
@@ -1520,7 +1543,7 @@ namespace {
         buf.lastOrbTick = -1;
         buf.runYRange = 0.f;
 
-        bool second = dual && buf.ghost2 && p2;
+        bool second = dual_buffer::stepOtherGhost(dual, p2 != nullptr, buf.ghost2 != nullptr);
         buf.haveRealRect = buf.ignoreTouching;
         buf.harmless.clear();
         if (buf.haveRealRect) {
@@ -1533,7 +1556,22 @@ namespace {
         if (second) {
             copyState(buf.ghost2, p2);
         }
-        buf.held1 = buf.held2 = buf.appliedInput;
+        // v2.95: dual mode - the ghost for the player whose input this is is the primary
+        // (acting) ghost; the ghost for the other player keeps its own held state and is
+        // never tapped by THIS input. (Symmetrical duals both press together: the other
+        // player's own queue models its press. See below.)
+        PlayerInput& actingIn = buf.pressPlayer1 ? buf.input1 : buf.input2;
+        PlayerInput& otherIn = buf.pressPlayer1 ? buf.input2 : buf.input1;
+        buf.held1 = actingIn.appliedInput;
+        buf.held2 = second ? otherIn.appliedInput : actingIn.appliedInput;
+        // The other player (dual) presses at the tick its already-queued press would fire
+        // in the real run: a coordinated dual press is judged as a coordinated dual press.
+        int otherPressAt = -1;
+        bool otherPressDown = true;
+        if (second && dual_buffer::otherQueuePress(dual, !otherIn.queue.empty())) {
+            otherPressAt = otherIn.queue.front().ticksLeft;
+            otherPressDown = otherIn.queue.front().down;
+        }
         buf.auto1 = buf.auto2 = false;
         buf.autoAt1 = buf.autoAt2 = -1;
 
@@ -1552,9 +1590,6 @@ namespace {
         bool upside2 = second && buf.ghost2->m_isUpsideDown;
         if (buf.waveV46 && waveRun && delay > 0 && !buf.skipPress) {
             pressGhost(buf.ghost1, !down);
-            if (second) {
-                pressGhost(buf.ghost2, !down);
-            }
         }
 
         float dt = buf.tickLength;
@@ -1608,18 +1643,16 @@ namespace {
             }
             if (tick == delay && !buf.skipPress) {
                 pressGhost(buf.ghost1, down);
-                if (second) {
-                    pressGhost(buf.ghost2, down);
-                }
+            }
+            if (second && otherPressAt >= 0 && tick == otherPressAt) {
+                // v2.95: the other player's own queued press (dual mode) still fires.
+                pressGhost(buf.ghost2, otherPressDown);
             }
             if (buf.retapAt >= 0) {
                 // v2.15: a second tap (let go, press, let go): "flip back" for the spider
                 int t = tick - delay - buf.retapAt;
                 if (t == 0 || t == 1 || t == 5) {
                     pressGhost(buf.ghost1, t == 1);
-                    if (second) {
-                        pressGhost(buf.ghost2, t == 1);
-                    }
                 }
             }
             // v2.16: a dash lasts as long as you hold, so the ghost doesn't let go mid-dash.
@@ -1628,11 +1661,10 @@ namespace {
             }
             if (releaseAfter >= 0 && tick == delay + releaseAfter) {
                 buf.secondInputFired = true;
-                // let go of a press (or, for a wave release, press again: the turn back)
+                // let go of a press (or, for a wave release, press again: the turn back).
+                // v2.95: the other ghost is not released by this input (it runs its own
+                // rhythm; in dual mode its release may well not have happened yet).
                 pressGhost(buf.ghost1, !down);
-                if (second) {
-                    pressGhost(buf.ghost2, !down);
-                }
             }
 
             // v2.18: with CBF the click lands partway through a tick, so the ghost's first
@@ -2349,7 +2381,7 @@ namespace {
     bool quickScore = false;
 
     int robotScore(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, int delay, int horizon, int target, SimEnd* end) {
-        int usual = robotHold.pick(st(20), 50);
+        int usual = robotHold[buf.pressPlayer1 ? 0 : 1].pick(st(20), 50);
         int best = simulateOrbs(layer, p1, p2, dual, delay, true, horizon, usual, target, end);
         robotUsedHold = usual;
         if (best >= target || *end == SimEnd::StopSearch || quickScore || !buf.robotSmart) {
@@ -2936,22 +2968,24 @@ namespace {
         if (!buf.showPath || buf.perfMode || !buf.pathNode || !buf.ghost1 || buf.simulating || p1->m_isDead || layer->m_isPlatformer) {
             return;
         }
-        if (tickCount < buf.pathHoldUntil || !buf.queue.empty() || tickCount % st(12) != 0) {
+        if (tickCount < buf.pathHoldUntil || !buf.input1.queue.empty() || tickCount % st(12) != 0) {
             return;
         }
-        bool twoPlayer = layer->m_level && layer->m_level->m_twoPlayerMode;
-        bool dual = !twoPlayer && layer->m_gameState.m_isDualMode && layer->m_player2;
+        bool dual = layer->m_gameState.m_isDualMode && layer->m_player2;
         auto* p2 = dual ? layer->m_player2 : nullptr;
         bool wave = p1->m_isDart || (p2 && p2->m_isDart);
         bool ship = p1->m_isShip || (p2 && p2->m_isShip);
         bool flyer = isFlying(p1) || (p2 && isFlying(p2));
         bool mini = (p1->m_isDart && p1->m_vehicleSize < 1.f) || (p2 && p2->m_isDart && p2->m_vehicleSize < 1.f);
         int horizon = wave ? fullWaveHorizon(mini) : (flyer ? fullFlyerHorizon() : st(std::clamp(buf.groundHorizon, 48, 240)));
-        bool down = !buf.appliedInput;
-        int releaseAfter = down && !wave && !ship ? holdEstimate() : -1;
+        bool down = !buf.input1.appliedInput;
+        int releaseAfter = down && !wave && !ship ? holdEstimate(0) : -1;
 
         buf.pathNode->clear();
         bool idleDied = false;
+        // v2.95: the path view always shows Player 1's path - the ghost is cloned from
+        // Player 1 regardless of which player's pending input was last buffered.
+        buf.pressPlayer1 = true;
         buf.skipPress = true;
         auto idle = recordRun(layer, p1, p2, dual, 0, down, horizon, -1, &idleDied);
         buf.skipPress = false;
@@ -2961,8 +2995,8 @@ namespace {
         drawPath(click, 0, { 1.f, 0.85f, 0.3f, 0.85f }, clickDied);
     }
 
-    void queueInput(int ticks, bool down) {
-        buf.queue.push_back({ ticks, down });
+    void queueInput(int ticks, bool down, PlayerInput& in) {
+        in.queue.push_back({ ticks, down });
     }
 
     // v2.51 practice stats: every save (or, in training, every input that would have been
@@ -3193,19 +3227,19 @@ namespace {
     // can be the first turn; the next turn may need to be delayed to clear a corner.
     // Robot keeps the original press-then-release behaviour.
     bool rescueQueuedTurn(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, bool anyWave, bool anyShip, bool mini,
-        int early, bool down) {
+        int early, bool down, PlayerInput& in) {
         bool anyRobot = p1->m_isRobot || (p2 && p2->m_isRobot);
-        if (buf.queue.empty() || !wave_rescue_policy::canRescue(static_cast<int>(buf.queue.size()),
-                buf.queue.front().down, down, anyWave, anyShip, anyRobot)) {
+        if (in.queue.empty() || !wave_rescue_policy::canRescue(static_cast<int>(in.queue.size()),
+                in.queue.front().down, down, anyWave, anyShip, anyRobot)) {
             return false;
         }
         // A mode/teleport portal normally ends a simulation as "safe". That is
         // not proof that the queued second input fired, so count only observed ticks.
         PortalSafetyGuard portalSafetyGuard;
-        bool firstDown = buf.queue.front().down;
+        bool firstDown = in.queue.front().down;
         bool flyer = anyWave || anyShip;
-        int firstIn = std::max(0, buf.queue.front().ticksLeft);
-        int naturalIn = std::max({ buf.shift - early, firstIn, 0 });
+        int firstIn = std::max(0, in.queue.front().ticksLeft);
+        int naturalIn = dual_buffer::queuedTicks(in.shift, early, firstIn);
         int naturalInterval = naturalIn - firstIn;
         int cap = st(buf.ticksAll);
         if (buf.lowLatency) {
@@ -3281,8 +3315,8 @@ namespace {
         noteSave(layer, extra);
         say("SAVED queued {} +{}t ({:g}f): turn {}t after first, {}t clear", down ? "press" : "release", extra,
             extra * TICK, foundInterval, std::max(0, foundRet - foundInterval));
-        buf.shift += extra;
-        queueInput(firstIn + foundInterval, down);
+        in.shift += extra;
+        queueInput(firstIn + foundInterval, down, in);
         return true;
     }
 
@@ -3296,41 +3330,44 @@ namespace {
 
         auto* level = layer->m_level;
         bool twoPlayer = level && level->m_twoPlayerMode;
-        // v2.55: a P2-side input in a two-player level only steers Player 2 while dual mode is
-        // on; before that it moves Player 1 (Relief's wave parts), so it's buffered like a P1 input.
-        if (twoPlayer && !isPlayer1 && layer->m_gameState.m_isDualMode) {
-            return false;
-        }
-        // In two-player levels P2 is someone else: never simulate P1's input on it.
-        bool dual = !twoPlayer && layer->m_gameState.m_isDualMode && layer->m_player2;
+        bool dualModeOn = layer->m_gameState.m_isDualMode;
+        // v2.55: in a two-player level outside dual mode, a P2-side input steers Player 1
+        // (Relief's wave parts), so it is buffered as a P1 input.
+        // v2.95: everywhere else both players steer themselves, and every input is buffered
+        // on the player whose button was pressed. Dual mode is buffered for BOTH players.
+        bool actsOnPlayer1 = dual_buffer::actsOnPlayer1(twoPlayer, dualModeOn, isPlayer1);
+        // Two-player mode outside dual mode: P2's input is P1's input (v2.55), so there is
+        // no second ghost to step. Dual mode (any level): both players run, so ghost 2
+        // (the other player) is stepped too and its survival is judged.
+        bool dual = dualModeOn && layer->m_player2;
+        auto* p1 = actsOnPlayer1 ? self->m_player1 : layer->m_player2;
+        auto* p2 = dual ? (actsOnPlayer1 ? layer->m_player2 : self->m_player1) : nullptr;
+        buf.pressPlayer1 = actsOnPlayer1;
+        auto& A = actsOnPlayer1 ? buf.input1 : buf.input2;
 
-        buf.isPlayer1 = isPlayer1;
-        buf.realInput = down;
+        A.realInput = down;
         buf.shipStraight = false;
-        if (buf.autoReleased) {
+        if (A.autoReleased) {
             // the game already let go for you: your real release has nothing left to do
-            buf.autoReleased = false;
-            buf.autoDash = false;
+            A.autoReleased = false;
+            A.autoDash = false;
             if (!down) {
                 return true;
             }
         }
         if (!buf.enabled) {
-            buf.appliedInput = down;
+            A.appliedInput = down;
             return false;
         }
         if (buf.practiceOnly && !layer->m_isPracticeMode) {
-            buf.appliedInput = down;
+            A.appliedInput = down;
             return false;
         }
         // v2.4: the ghost never presses left/right, so platformer predictions are meaningless.
         if (layer->m_isPlatformer) {
-            buf.appliedInput = down;
+            A.appliedInput = down;
             return false;
         }
-
-        auto* p1 = self->m_player1;
-        auto* p2 = dual ? layer->m_player2 : nullptr;
 
         // v2.18 Click Between Frames: a click that arrives in the middle of P1's physics step
         // landed `midTick` of the way through the tick (measured from how far P1 has moved
@@ -3338,7 +3375,7 @@ namespace {
         // delayed inputs are queued one tick sooner, because the game's next tick boundary
         // is already the ghost's tick 1.
         float midTick = 0.f;
-        if (buf.cbfSync && buf.inRealUpdate && p1 && std::abs(buf.tickDx) > 0.01f) {
+        if (buf.cbfSync && buf.inRealUpdate && actsOnPlayer1 && p1 && std::abs(buf.tickDx) > 0.01f) {
             midTick = std::clamp((p1->getPosition().x - buf.tickStartX) / buf.tickDx, 0.f, 0.999f);
         }
         buf.firstStep = 1.f - midTick;
@@ -3350,14 +3387,15 @@ namespace {
         int early = midTick > 0.f ? 1 : 0;
 
         bool anyShip = p1 && (p1->m_isShip || (p2 && p2->m_isShip));
-        if (!p1 || p1->m_isDead || (anyShip && !buf.shipBuffer)) {
+        // v2.95: if the other player is already dead the level is over - buffer nothing.
+        if (!p1 || p1->m_isDead || (p2 && p2->m_isDead) || (anyShip && !buf.shipBuffer)) {
             resetPending();
-            buf.appliedInput = down;
+            A.appliedInput = down;
             return false;
         }
 
-        if (down && buf.queue.empty()) {
-            buf.releaseShift = 0;
+        if (down && A.queue.empty()) {
+            A.releaseShift = 0;
         }
 
         // A real press while touching an orb belongs to the player, even if the
@@ -3372,11 +3410,11 @@ namespace {
         // when a tick inside the same orb lives longer (see the fallback below).
         // v2.94: ship included - a ship orb click was never checked or re-timed, so frame
         // perfect ship orb clicks (the whole point of ship buffering) were passed through.
-        bool orbRetime = down && touchingOrb && buf.queue.empty() && buf.smart && buf.orbAlign && buf.orbTiming &&
+        bool orbRetime = down && touchingOrb && A.queue.empty() && buf.smart && buf.orbAlign && buf.orbTiming &&
             !p1->m_isDart && !(p2 && p2->m_isDart) &&
             (p1->m_isOnGround && (!p2 || p2->m_isOnGround) ? buf.orbAlignGround : true);
-        if (prediction_policy::passOrbPress(down, touchingOrb, buf.queue.empty(), orbRetime)) {
-            buf.appliedInput = true;
+        if (prediction_policy::passOrbPress(down, touchingOrb, A.queue.empty(), orbRetime)) {
+            A.appliedInput = true;
             if (buf.explain) {
                 say("pass press: touching an orb (player's timing)");
             }
@@ -3391,13 +3429,13 @@ namespace {
         // the last, is a straight-fly rhythm. Those taps are the whole point of ship
         // buffering, so they are recognised before (and exempt from) the spam guard.
         if (anyShip && !anyWave) {
-            bool alternating = buf.shipTapStreak > 0 && down != buf.lastShipTapDown && buf.sinceInput <= st(24);
-            buf.shipTapStreak = alternating ? buf.shipTapStreak + 1 : 1;
-            buf.lastShipTapDown = down;
-            buf.shipStraight = buf.shipTapStreak >= 3;
+            bool alternating = A.shipTapStreak > 0 && down != A.lastShipTapDown && A.sinceInput <= st(24);
+            A.shipTapStreak = alternating ? A.shipTapStreak + 1 : 1;
+            A.lastShipTapDown = down;
+            buf.shipStraight = A.shipTapStreak >= 3;
         }
         else {
-            buf.shipTapStreak = 0;
+            A.shipTapStreak = 0;
         }
 
         // Wave spam: don't fight fast inputs. Counted for every input, including ones made
@@ -3417,13 +3455,13 @@ namespace {
             // Keep tight inverted zigzags buffered instead of mistaking them for spam.
             spamGap = prediction_policy::waveSpamGap(spamGap, prediction_policy::invertedWave(p1, p2, dual), st(6));
         }
-        if (buf.sinceInput < spamGap) {
-            ++buf.rapid;
+        if (A.sinceInput < spamGap) {
+            ++A.rapid;
         }
         else {
-            buf.rapid = 0;
+            A.rapid = 0;
         }
-        buf.sinceInput = 0;
+        A.sinceInput = 0;
         bool anyUfo = p1->m_isBird || (p2 && p2->m_isBird);
         bool anyBall = p1->m_isBall || (p2 && p2->m_isBall);
         bool anySwing = p1->m_isSwing || (p2 && p2->m_isSwing);
@@ -3431,10 +3469,10 @@ namespace {
         // game, which is why ship buffering ate your flicks); v4.6 wave gets a longer streak.
         int streakLimit = prediction_policy::spamStreak(waveSpamRules, SPAM_STREAK);
         if ((waveSpamRules || (anyUfo && buf.ufoSmart) || (anyBall && buf.ballSmart) || (anySwing && buf.swingSmart)) &&
-            !buf.shipStraight && buf.rapid >= streakLimit &&
-            !wave_rescue_policy::preserveQueueOnSpam(anyWave, buf.waveV46, buf.queue.empty())) {
+            !buf.shipStraight && A.rapid >= streakLimit &&
+            !wave_rescue_policy::preserveQueueOnSpam(anyWave, buf.waveV46, A.queue.empty())) {
             if (buf.explain) {
-                say("pass {}: spam ({} fast inputs in a row, gap < {}t)", down ? "press" : "release", buf.rapid, spamGap);
+                say("pass {}: spam ({} fast inputs in a row, gap < {}t)", down ? "press" : "release", A.rapid, spamGap);
             }
             // v2.47: path view marks inputs that skipped prediction (gray dot on you), so a
             // missing path isn't mistaken for a broken mod
@@ -3445,42 +3483,42 @@ namespace {
             // v2.66: inputs still waiting aren't dropped any more (a dropped press was a turn
             // that never happened) and aren't all sent at once (v2.49, a zero-length tap):
             // they fire one per tick, in order, starting next tick, and this input right after.
-            if (!buf.queue.empty()) {
-                for (size_t i = 0; i < buf.queue.size(); ++i) {
-                    buf.queue[i].ticksLeft = static_cast<int>(i);
+            if (!A.queue.empty()) {
+                for (size_t i = 0; i < A.queue.size(); ++i) {
+                    A.queue[i].ticksLeft = static_cast<int>(i);
                 }
-                if (buf.queue.back().down != down) {
-                    queueInput(static_cast<int>(buf.queue.size()), down);
+                if (A.queue.back().down != down) {
+                    queueInput(static_cast<int>(A.queue.size()), down, A);
                 }
-                buf.shift = 0;
+                A.shift = 0;
                 return true;
             }
-            buf.appliedInput = down;
+            A.appliedInput = down;
             return false;
         }
 
         // v4.6 wave mode only: while a delayed input waits, a quick opposite input fires
         // one tick after it; pressing the same way again cancels that. (The default wave
         // mode shifts it like the cube does, below, so your zigzag keeps its shape.)
-        if (!buf.queue.empty() && anyWave && buf.waveV46) {
-            auto first = buf.queue.front();
-            buf.queue.erase(buf.queue.begin() + 1, buf.queue.end());
+        if (!A.queue.empty() && anyWave && buf.waveV46) {
+            auto first = A.queue.front();
+            A.queue.erase(A.queue.begin() + 1, A.queue.end());
             if (down != first.down) {
-                queueInput(first.ticksLeft + 1, down);
+                queueInput(first.ticksLeft + 1, down, A);
             }
             return true;
         }
 
         // A delay is in progress: shift this input by the same amount so your
         // rhythm (tap length, hold length, follow-up clicks) is preserved.
-        if (!buf.queue.empty()) {
+        if (!A.queue.empty()) {
             // Check both press->release and release->press in wave and ship.
-            if (rescueQueuedTurn(layer, p1, p2, dual, anyWave, anyShip, mini, early, down)) {
+            if (rescueQueuedTurn(layer, p1, p2, dual, anyWave, anyShip, mini, early, down, A)) {
                 return true;
             }
-            int after = buf.queue.back().ticksLeft;
+            int after = A.queue.back().ticksLeft;
             // low latency: a new press isn't shifted, it goes right after what's already queued
-            queueInput(buf.lowLatency && down ? after : std::max(buf.shift - early, after), down);
+            queueInput(buf.lowLatency && down ? after : dual_buffer::queuedTicks(A.shift, early, after), down, A);
             return true;
         }
 
@@ -3497,15 +3535,15 @@ namespace {
             // v2.16: letting go ends a dash, so dash releases are predicted like robot ones.
             bool dashing = p1->m_isDashing || (p2 && p2->m_isDashing);
             if (!wave2 && !down && !robot && !dashing && !anyShip) {
-                if (buf.releaseShift > 0) {
+                if (A.releaseShift > 0) {
                     // the press was delayed, so its release is delayed by the same amount:
                     // the hold length the ghost was tested with is the one the game gets
-                    buf.shift = buf.releaseShift;
-                    buf.releaseShift = 0;
-                    queueInput(buf.shift, false);
+                    A.shift = A.releaseShift;
+                    A.releaseShift = 0;
+                    queueInput(A.shift, false, A);
                     return true;
                 }
-                buf.appliedInput = false;
+                A.appliedInput = false;
                 return false;
             }
         }
@@ -3530,7 +3568,7 @@ namespace {
             if (buf.explain) {
                 say("pass {}: max delay is 0 for this mode", down ? "press" : "release");
             }
-            buf.appliedInput = down;
+            A.appliedInput = down;
             return false;
         }
 
@@ -3545,7 +3583,8 @@ namespace {
         bool dashRelease = !down && !anyFlyer && (p1->m_isDashing || (p2 && p2->m_isDashing));
         int releaseAfter = -1;
         if (down && !anyWave && !anyShip) {
-            releaseAfter = anyRobot ? robotHold.pick(st(20), 50) : holdEstimate();
+            releaseAfter = anyRobot ? robotHold[buf.pressPlayer1 ? 0 : 1].pick(st(20), 50)
+                                   : holdEstimate(buf.pressPlayer1 ? 0 : 1);
         }
 
         // On the ground a press is a jump. v2.93: if that jump is a death, the press is moved into
@@ -3574,12 +3613,12 @@ namespace {
                 : alignOrb(layer, p1, p2, dual, horizon, releaseAfter, memoryDelay(sliceOf(p1)), &orbLanded, fullOnlyAlign, !grounded, grounded,
                       originalOrbUsed, anyShip);
             if (originalOrbUsed) {
-                buf.appliedInput = down;
+                A.appliedInput = down;
                 return false;
             }
             if (k > 0 && trainInstead(layer, k, down, "orb")) {
                 decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
-                buf.appliedInput = down;
+                A.appliedInput = down;
                 return false;
             }
             if (k > 0) {
@@ -3599,14 +3638,14 @@ namespace {
                     noteSave(layer, k);
                 }
                 decided(layer, p1, p2, dual, k, down, horizon, releaseAfter);
-                buf.shift = k;
-                queueInput(k - early, down);
+                A.shift = k;
+                queueInput(k - early, down, A);
                 return true;
             }
             if (orbRetime || buf.orbWasTiming) {
                 // v2.86: no tick inside the orb is a real save over the click you just made, so
                 // the press reaches the game exactly as before (your timing, no safety veto).
-                buf.appliedInput = down;
+                A.appliedInput = down;
                 if (buf.explain) {
                     say("orb timing: no tick inside the orb lives longer than your click ({}t)", buf.orbNowRet);
                 }
@@ -3761,8 +3800,8 @@ namespace {
                     say("MORE TIME {}{} +{}t: crash t{} -> {} (died here {}x)", down ? "press" : "release", tickTag, bestK, crash0,
                         bestCrash < 0 ? std::string("none") : fmt::format("t{}", bestCrash), spotAround(sliceOf(p1)).deaths);
                     decided(layer, p1, p2, dual, bestK, down, horizon, releaseAfter);
-                    buf.shift = bestK;
-                    queueInput(bestK - early, down);
+                    A.shift = bestK;
+                    queueInput(bestK - early, down, A);
                     return true;
                 }
             }
@@ -3778,7 +3817,7 @@ namespace {
                 }
             }
             decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
-            buf.appliedInput = down;
+            A.appliedInput = down;
             return false;
         }
 
@@ -3806,7 +3845,7 @@ namespace {
                     maxDelay);
             }
             decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
-            buf.appliedInput = down;
+            A.appliedInput = down;
             return false;
         }
 
@@ -3817,7 +3856,7 @@ namespace {
             say("memory: saves here failed before, input left alone");
             decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
             pending.skipped = true;
-            buf.appliedInput = down;
+            A.appliedInput = down;
             return false;
         }
 
@@ -3900,7 +3939,7 @@ namespace {
             say("no save: {}{} dies in {}t (max {}t, best +{}t -> {}t of {}){}", down ? "press" : "release", tickTag, base, maxDelay,
                 dbgBestK, dbgBestRet, horizon, !crashFixed ? "" : base < st(30) ? " - too late: waiting only makes it crash sooner" : " - same crash at any timing (next obstacle)");
             decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
-            buf.appliedInput = down;
+            A.appliedInput = down;
             return false;
         }
 
@@ -3952,7 +3991,7 @@ namespace {
                 say("pass {}{}: no delay holds up better than the click you made", down ? "press" : "release", tickTag);
             }
             decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
-            buf.appliedInput = down;
+            A.appliedInput = down;
             return false;
         }
 
@@ -3966,13 +4005,13 @@ namespace {
         if (buf.avoidMovers && buf.sawMover) {
             say("skip +{}t save: moving objects ahead", saved);
             decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
-            buf.appliedInput = down;
+            A.appliedInput = down;
             return false;
         }
 
         if (trainInstead(layer, saved, down, swingPress ? "swing" : "")) {
             decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
-            buf.appliedInput = down;
+            A.appliedInput = down;
             return false;
         }
         if (robotPress) {
@@ -3986,8 +4025,8 @@ namespace {
             : cubeStyleWave && marginUsed ? std::string("  +margin")
             : robotPress ? fmt::format("  hold {}t", robotUsedHold) : std::string());
         decided(layer, p1, p2, dual, saved, down, horizon, releaseAfter);
-        buf.shift = saved;
-        queueInput(saved - early, down);
+        A.shift = saved;
+        queueInput(saved - early, down, A);
         return true;
     }
 
@@ -3999,8 +4038,13 @@ namespace {
         // A delayed input that was waiting is dropped; the game gets what you're really
         // holding now (otherwise, with the buffer switched off, it never would).
         auto* layer = GameManager::get()->m_playLayer;
-        if (layer && !buf.autoReleased && buf.appliedInput != buf.realInput) {
-            sendButton(layer, buf.realInput);
+        if (layer) {
+            for (bool isP1 : { true, false }) {
+                auto& in = isP1 ? buf.input1 : buf.input2;
+                if (!in.autoReleased && in.appliedInput != in.realInput) {
+                    sendButton(layer, in.realInput, isP1);
+                }
+            }
         }
         applyStage();
         readSettings();
@@ -4014,13 +4058,16 @@ namespace {
     // letting go now clearly survives longer, let go for you. Your own release later is
     // swallowed, and your next press works as normal.
     void tryAutoRelease(PlayLayer* layer, PlayerObject* p1) {
-        if ((!buf.autoRelease && !buf.robotAutoRelease && !buf.dashAutoRelease) || buf.autoReleased || layer->m_isPlatformer) {
+        // v2.95: per-player. Auto-release is a practice-mode tool for the acting player
+        // (Player 1; P2 in a two-player level is someone else).
+        auto& in = buf.input1;
+        if ((!buf.autoRelease && !buf.robotAutoRelease && !buf.dashAutoRelease) || in.autoReleased || layer->m_isPlatformer) {
             return;
         }
         if (!layer->m_isPracticeMode && !buf.autoNormalRuns) {
             return;
         }
-        if (!buf.queue.empty() || !buf.realInput || !buf.appliedInput || !buf.isPlayer1 || !buf.ghost1) {
+        if (!in.queue.empty() || !in.realInput || !in.appliedInput || !buf.ghost1) {
             return;
         }
         if (layer->m_level && layer->m_level->m_twoPlayerMode) {
@@ -4037,6 +4084,7 @@ namespace {
         bool mini = (p1->m_isDart && p1->m_vehicleSize < 1.f) || (p2 && p2->m_isDart && p2->m_vehicleSize < 1.f);
 
         int window = st(std::clamp(buf.autoWindow, 2, 24));
+        buf.pressPlayer1 = true;
         buf.sawMover = false;
         buf.skipPress = true;
         buf.orbClick = buf.assumeOrbs;
@@ -4061,61 +4109,83 @@ namespace {
         if (buf.avoidMovers && buf.sawMover) {
             return;
         }
-        buf.autoReleased = true;
-        buf.autoDash = dash;
-        sendButton(layer, false);
+        in.autoReleased = true;
+        in.autoDash = dash;
+        sendButton(layer, false, true);
         say("AUTO release{}: holding dies in {}t, letting go lives {}t", dash ? " (dash)" : (robot ? " (robot)" : ""), hold, release);
     }
 
     void deliverPending(PlayLayer* layer, PlayerObject* player) {
-        if (buf.sinceInput <= 998) {
-            ++buf.sinceInput;
-        }
         if ((buf.avoidMovers || buf.predictMovers) && !watched.empty()) {
             updateWatched();
         }
 
-        bool twoPlayer = layer->m_level && layer->m_level->m_twoPlayerMode;
-        bool dual = !twoPlayer && layer->m_gameState.m_isDualMode && layer->m_player2;
-        if (!buf.shipBuffer && (player->m_isShip || (dual && layer->m_player2->m_isShip))) {
+        bool dual = layer->m_gameState.m_isDualMode && layer->m_player2;
+        bool ship = (layer->m_player1 && layer->m_player1->m_isShip) ||
+            (dual && layer->m_player2 && layer->m_player2->m_isShip);
+        if (!buf.shipBuffer && ship) {
+            // v2.95: ship buffering off - both players' queues reset (was P1 only)
             resetPending();
-            buf.autoReleased = false;
-            if (buf.appliedInput != buf.realInput) {
-                sendButton(layer, buf.realInput);
+            buf.input1.autoReleased = false;
+            buf.input2.autoReleased = false;
+            for (bool isP1 : { true, false }) {
+                auto& in = isP1 ? buf.input1 : buf.input2;
+                if (in.appliedInput != in.realInput) {
+                    sendButton(layer, in.realInput, isP1);
+                }
             }
             return;
         }
-        // Left wave / robot while auto-released: the game goes back to what you're really holding.
-        bool autoMode = player->m_isDart || player->m_isRobot || (dual && (layer->m_player2->m_isDart || layer->m_player2->m_isRobot));
-        if (buf.autoReleased && !buf.autoDash && !autoMode) {
-            buf.autoReleased = false;
-        }
 
-        if (buf.queue.empty()) {
-            if (buf.appliedInput != buf.realInput && !buf.autoReleased) {
-                sendButton(layer, buf.realInput);
+        // v2.95: both players' pending inputs are delivered from the tick driver
+        // (Player 1's update). Dual mode runs both players; each keeps its own queue,
+        // shift, hold state and spam streak.
+        auto& inputs[2] = { buf.input1, buf.input2 };
+        auto* real[2] = { layer->m_player1, layer->m_player2 };
+        for (int i = 0; i < 2; ++i) {
+            auto& in = inputs[i];
+            bool isP1 = i == 0;
+            auto* acting = real[i];
+            if (!acting) {
+                continue;
             }
-            tryAutoRelease(layer, player);
-            sweepGhostLayer();
-            return;
-        }
+            if (in.sinceInput <= 998) {
+                ++in.sinceInput;
+            }
+            // Left wave / robot while auto-released: the game goes back to what you're really holding.
+            auto* other = dual ? (isP1 ? layer->m_player2 : layer->m_player1) : nullptr;
+            bool autoMode = acting->m_isDart || acting->m_isRobot || (other && (other->m_isDart || other->m_isRobot));
+            if (in.autoReleased && !in.autoDash && !autoMode) {
+                in.autoReleased = false;
+            }
+            if (in.queue.empty()) {
+                if (in.appliedInput != in.realInput && !in.autoReleased) {
+                    sendButton(layer, in.realInput, isP1);
+                }
+                if (isP1) {
+                    tryAutoRelease(layer, acting);
+                }
+                continue;
+            }
 
-        // Check before decrementing: an input queued with N ticks fires right before
-        // physics step N, which is exactly what simulate(delay = N) tested.
-        while (!buf.queue.empty() && buf.queue.front().ticksLeft <= 0) {
-            bool down = buf.queue.front().down;
-            buf.queue.pop_front();
-            buf.releaseShift = down ? buf.shift : 0;
-            if (down != buf.appliedInput) {
-                sendButton(layer, down);
+            // Check before decrementing: an input queued with N ticks fires right before
+            // physics step N, which is exactly what simulate(delay = N) tested.
+            while (!in.queue.empty() && in.queue.front().ticksLeft <= 0) {
+                bool down = in.queue.front().down;
+                in.queue.pop_front();
+                in.releaseShift = down ? in.shift : 0;
+                if (down != in.appliedInput) {
+                    sendButton(layer, down, isP1);
+                }
+            }
+            for (auto& q : in.queue) {
+                --q.ticksLeft;
+            }
+            if (in.queue.empty()) {
+                in.shift = 0;
             }
         }
-        for (auto& q : buf.queue) {
-            --q.ticksLeft;
-        }
-        if (buf.queue.empty()) {
-            buf.shift = 0;
-        }
+        sweepGhostLayer();
     }
 }
 
@@ -4552,9 +4622,11 @@ class $modify(BufPlayLayer, PlayLayer) {
             return;
         }
         resetPending();
-        buf.appliedInput = false;
-        buf.autoReleased = false;
-        buf.rapid = 0;
+        for (auto& in : { buf.input1, buf.input2 }) {
+            in.appliedInput = false;
+            in.autoReleased = false;
+            in.rapid = 0;
+        }
         forgetPress();
         memoryDeath();
         benchFinish();
@@ -4691,11 +4763,12 @@ class $modify(BufPlayLayer, PlayLayer) {
         // layer, dark or glow shaders could hide the path completely.
         (m_aboveShaderObjectLayer ? m_aboveShaderObjectLayer : m_objectLayer)->addChild(buf.pathNode, 9999);
 
-        buf.realInput = false;
-        buf.appliedInput = false;
-        buf.isPlayer1 = true;
-        buf.sinceInput = 999;
-        buf.rapid = 0;
+        for (auto& in : { buf.input1, buf.input2 }) {
+            in.realInput = false;
+            in.appliedInput = false;
+            in.sinceInput = 999;
+            in.rapid = 0;
+        }
         forgetPress();
         return true;
     }
@@ -4721,14 +4794,16 @@ class $modify(BufPlayLayer, PlayLayer) {
         benchNeedStart = true;
         endAttempt();
         buf.usedThisAttempt = false;
-        buf.shipTapStreak = 0;
+        for (auto& in : { buf.input1, buf.input2 }) {
+            in.shipTapStreak = 0;
+            in.autoReleased = false;
+        }
         buf.shipStraight = false;
         resetPending();
         forgetPress();
         if (buf.pathNode) {
             buf.pathNode->clear();
         }
-        buf.autoReleased = false;
         drift.active = false;
         PlayLayer::resetLevel();
     }
@@ -5196,11 +5271,19 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
 
     void handleButton(bool down, int button, bool isPlayer1) {
         if (!buf.simulating && button == 1 && !buf.injecting) {
-            auto* p1 = this->m_player1;
+            auto* layer = GameManager::get()->m_playLayer;
+            bool twoPlayer = layer && layer->m_level && layer->m_level->m_twoPlayerMode;
+            bool dualModeOn = layer && layer->m_gameState.m_isDualMode;
+            bool actsOnPlayer1 = layer ? dual_buffer::actsOnPlayer1(twoPlayer, dualModeOn, isPlayer1) : isPlayer1;
+            auto* p1 = actsOnPlayer1 ? this->m_player1 : this->m_player2;
+            if (!p1) {
+                p1 = this->m_player1;
+                actsOnPlayer1 = true;
+            }
             if (down || (p1 && (p1->m_isDart || p1->m_isRobot))) {
                 finishDrift("");
             }
-            recordRealInput(down, p1);
+            recordRealInput(down, p1, actsOnPlayer1 ? buf.input1 : buf.input2, actsOnPlayer1 ? 0 : 1);
         }
         if (!buf.simulating && button == 1 && !buf.injecting) {
             // v2.21 performance log: what this click cost, measured around the whole decision.
