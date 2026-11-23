@@ -4140,27 +4140,25 @@ namespace {
         // v2.95: both players' pending inputs are delivered from the tick driver
         // (Player 1's update). Dual mode runs both players; each keeps its own queue,
         // shift, hold state and spam streak.
-        auto& inputs[2] = { buf.input1, buf.input2 };
-        auto* real[2] = { layer->m_player1, layer->m_player2 };
         for (int i = 0; i < 2; ++i) {
-            auto& in = inputs[i];
             bool isP1 = i == 0;
-            auto* acting = real[i];
+            auto* in = isP1 ? &buf.input1 : &buf.input2;
+            auto* acting = isP1 ? layer->m_player1 : layer->m_player2;
             if (!acting) {
                 continue;
             }
-            if (in.sinceInput <= 998) {
-                ++in.sinceInput;
+            if (in->sinceInput <= 998) {
+                ++in->sinceInput;
             }
             // Left wave / robot while auto-released: the game goes back to what you're really holding.
             auto* other = dual ? (isP1 ? layer->m_player2 : layer->m_player1) : nullptr;
             bool autoMode = acting->m_isDart || acting->m_isRobot || (other && (other->m_isDart || other->m_isRobot));
-            if (in.autoReleased && !in.autoDash && !autoMode) {
-                in.autoReleased = false;
+            if (in->autoReleased && !in->autoDash && !autoMode) {
+                in->autoReleased = false;
             }
-            if (in.queue.empty()) {
-                if (in.appliedInput != in.realInput && !in.autoReleased) {
-                    sendButton(layer, in.realInput, isP1);
+            if (in->queue.empty()) {
+                if (in->appliedInput != in->realInput && !in->autoReleased) {
+                    sendButton(layer, in->realInput, isP1);
                 }
                 if (isP1) {
                     tryAutoRelease(layer, acting);
@@ -4170,19 +4168,19 @@ namespace {
 
             // Check before decrementing: an input queued with N ticks fires right before
             // physics step N, which is exactly what simulate(delay = N) tested.
-            while (!in.queue.empty() && in.queue.front().ticksLeft <= 0) {
-                bool down = in.queue.front().down;
-                in.queue.pop_front();
-                in.releaseShift = down ? in.shift : 0;
-                if (down != in.appliedInput) {
+            while (!in->queue.empty() && in->queue.front().ticksLeft <= 0) {
+                bool down = in->queue.front().down;
+                in->queue.pop_front();
+                in->releaseShift = down ? in->shift : 0;
+                if (down != in->appliedInput) {
                     sendButton(layer, down, isP1);
                 }
             }
-            for (auto& q : in.queue) {
+            for (auto& q : in->queue) {
                 --q.ticksLeft;
             }
-            if (in.queue.empty()) {
-                in.shift = 0;
+            if (in->queue.empty()) {
+                in->shift = 0;
             }
         }
         sweepGhostLayer();
@@ -4622,7 +4620,8 @@ class $modify(BufPlayLayer, PlayLayer) {
             return;
         }
         resetPending();
-        for (auto& in : { buf.input1, buf.input2 }) {
+        for (bool isP1 : { true, false }) {
+            auto& in = isP1 ? buf.input1 : buf.input2;
             in.appliedInput = false;
             in.autoReleased = false;
             in.rapid = 0;
@@ -4763,7 +4762,8 @@ class $modify(BufPlayLayer, PlayLayer) {
         // layer, dark or glow shaders could hide the path completely.
         (m_aboveShaderObjectLayer ? m_aboveShaderObjectLayer : m_objectLayer)->addChild(buf.pathNode, 9999);
 
-        for (auto& in : { buf.input1, buf.input2 }) {
+        for (bool isP1 : { true, false }) {
+            auto& in = isP1 ? buf.input1 : buf.input2;
             in.realInput = false;
             in.appliedInput = false;
             in.sinceInput = 999;
@@ -4794,7 +4794,8 @@ class $modify(BufPlayLayer, PlayLayer) {
         benchNeedStart = true;
         endAttempt();
         buf.usedThisAttempt = false;
-        for (auto& in : { buf.input1, buf.input2 }) {
+        for (bool isP1 : { true, false }) {
+            auto& in = isP1 ? buf.input1 : buf.input2;
             in.shipTapStreak = 0;
             in.autoReleased = false;
         }
