@@ -1,4 +1,5 @@
-// Click Before Frames v2.94 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
+// Click Before Frames v2.95 (wave precision on hard levels, unit-aware movement prediction,
+// cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
 // ahead with your input. If the ghost dies, the input is retried with 1..N ticks of
@@ -19,6 +20,7 @@
 
 #include "prediction_policy.hpp"
 #include "wave_rescue_policy.hpp"
+#include "motion_policy.hpp"
 #include "menu_shortcut.hpp"
 #include <Geode/Geode.hpp>
 #include <Geode/modify/CCCircleWave.hpp>
@@ -37,6 +39,7 @@
 #include <Geode/modify/RingObject.hpp>
 #include <Windows.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -246,9 +249,18 @@ namespace {
         bool autoRelease = false;    // v2.4: wave auto-release (practice mode only)
         int autoWindow = 6;          // v2.4: hold must die within this many ticks to auto-release
         bool autoReleased = false;   // v2.4: we released for you; your real release is swallowed
+        int lastAutoCheck = -1000;   // v2.95: auto-release checks every other physics step
         int spamGap = 16;            // v2.5.2: inputs closer than this (ticks) count toward wave spam
         bool waveMargin = true;      // v2.10: center wave saves in the safe window (1 tick of room)
         bool waveV46 = false;        // v2.7: use the old v4.6 wave rules instead of the cube-style ones
+        // v2.95: hard wave levels need a longer look-ahead and stricter recovery. Also
+        // recorded per scoring run: a "safe" turn that only works if you react in time
+        // is not the same thing as a path that clears the corridor on its own.
+        bool wavePrecision = true;
+        bool scoreUsedRecovery = false;
+        int moverCount = 0;          // v2.95: moving objects projected in the last search
+        float moverUnits = 0.f;      // v2.95: fastest measured movement, in units per step
+        int moverSteps = 0;          // v2.95: how many steps that movement was projected over
         bool orbAlign = true;        // v2.6: hold an early press back until the ghost is inside the orb
         bool orbAlignGround = false; // v2.11.1: also align presses made on the ground (jumps)
         bool ignoreTouching = true;  // v2.31: hazards you touch right now without dying can't kill the ghost
@@ -287,7 +299,9 @@ namespace {
         float firstStep = 1.f;       // v2.18: fraction of a tick the ghost's first step lasts
         bool inRealUpdate = false;   // v2.18: inside P1's physics step (a CBF click lands here)
         float tickStartX = 0.f;      // v2.18: P1's x at the start of the current tick
+        float tickStartY = 0.f;      // v2.95: P1's y at the start of the current tick
         float tickDx = 0.f;          // v2.18: how far P1 moved in the last full tick
+        float unitsPerStep = 0.f;    // v2.95: measured distance moved per physics step, in units
         bool dashAutoRelease = false;  // v2.16: let go of a dash for you when it would crash
         bool autoDash = false;       // v2.16: the current auto-release ended a dash
         std::unordered_set<GameObject*> orbsUsed;  // v2.16: orbs the ghost actually used this run
@@ -362,10 +376,24 @@ namespace {
         double pvy = 0.0;
         double rot = 0.0;  // v2.68: rotation, and how much it turns per step
         double vrot = 0.0;
+        // v2.95: collisions can follow either the object's base position or its node
+        // position (rotating / skewed objects). Measure both and use the one that
+        // actually moves, in units, so a prediction sees how far the object went.
+        double nodeX = 0.0, nodeY = 0.0;
+        double units = 0.0;
+        std::array<double, 4> unitSamples {};
+        int unitSamplesCount = 0;
+        int unitSampleAt = 0;
     };
     constexpr int MOVER_TICKS = 120;
     constexpr size_t WATCH_LIMIT = 4096;
     std::unordered_map<GameObject*, Watched> watched;
+
+    // v2.95: during a prediction objects are temporarily moved to where the ghost
+    // expects them. Those shifted positions are not real movement: remember the real
+    // pose before shifting so the motion tracker never learns from its own prediction.
+    struct RealPose { double x, y, rot, nodeX, nodeY; };
+    std::unordered_map<GameObject*, RealPose> simPoses;
 
     // v2.4 drift check: the recorded ghost run for your last input and how far you strayed.
     struct Drift {
@@ -545,6 +573,8 @@ namespace {
         buf.robotAutoRelease = mod->getSettingValue<bool>("robot-auto-release");
         buf.autoNormalRuns = mod->getSettingValue<bool>("auto-release-normal-runs");
         buf.waveV46 = mod->getSettingValue<bool>("wave-v46");
+        // v2.95: precision is the default wave assist; v4.6 users keep their old rules.
+        buf.wavePrecision = mod->getSettingValue<bool>("wave-precision") && !buf.waveV46;
         buf.waveMargin = mod->getSettingValue<bool>("wave-safety-margin") && !buf.lowLatency;
         buf.orbWindow = static_cast<int>(mod->getSettingValue<int64_t>("orb-align-ticks"));
         // v2.71 performance mode: for PCs that drop frames on clicks. Shorter searches, no
@@ -621,8 +651,13 @@ namespace {
             buf.smart, buf.fullState, buf.robustSaves, buf.lateCrash, buf.practiceOnly);
         text += fmt::format("orbs: align {} (ground {}, {}t) timing {} assume {} both {} | memory {} ({} spots)\n", buf.orbAlign,
             buf.orbAlignGround, buf.orbWindow, buf.orbTiming, buf.assumeOrbs, buf.tryBothOrbs, buf.learn, memorySpots());
-        text += fmt::format("wave: v4.6 {} margin {} horizon {} spam gap {} | robot smart {} | spider smart {} | ship {} (same max delay as every mode)\n",
-            buf.waveV46, buf.waveMargin, buf.waveHorizon, buf.spamGap, buf.robotSmart, buf.spiderSmart, buf.shipBuffer);
+        text += fmt::format("wave: v4.6 {} precision {} margin {} horizon {} spam gap {} | robot smart {} | spider smart {} | ship {} (same max delay as every mode)\n",
+            buf.waveV46, buf.wavePrecision, buf.waveMargin, buf.waveHorizon, buf.spamGap, buf.robotSmart, buf.spiderSmart, buf.shipBuffer);
+        float nominalSpeed = 0.f;
+        if (auto* play = GameManager::get()->m_playLayer; play && play->m_player1) {
+            nominalSpeed = play->m_player1->m_playerSpeed;
+        }
+        text += fmt::format("movement: {:.2f}u per physics step measured (nominal speed {:.2f})\n", buf.unitsPerStep, nominalSpeed);
         text += fmt::format("auto-release: wave {} robot {} dash {} normal runs {} window {} | movers: avoid {} predict {}\n",
             buf.autoRelease, buf.robotAutoRelease, buf.dashAutoRelease, buf.autoNormalRuns, buf.autoWindow, buf.avoidMovers,
             buf.predictMovers);
@@ -683,6 +718,8 @@ namespace {
         buf.autoReleased = false;
         buf.recordPath = nullptr;
         watched.clear();
+        simPoses.clear();
+        buf.unitsPerStep = 0.f;
         drift.active = false;
         resetPending();
     }
@@ -981,11 +1018,28 @@ namespace {
     // and any that moved recently make the decision "don't buffer" (the ghost sees the
     // level frozen at the click, so it tests them in the wrong place).
     void watchObject(GameObject* object) {
-        auto [it, added] = watched.try_emplace(object, Watched { object->m_positionX, object->m_positionY, -MOVER_TICKS });
-        if (added) {
-            it->second.rot = object->getRotation();
+        auto const& node = object->getPosition();
+        double x = object->m_positionX, y = object->m_positionY;
+        double nodeX = node.x, nodeY = node.y, rot = object->getRotation();
+        if (buf.simulating) {
+            // Only objects moved by placeMovers have a snapshot; everything else is
+            // already at its real position.
+            if (auto pose = simPoses.find(object); pose != simPoses.end()) {
+                x = pose->second.x;
+                y = pose->second.y;
+                nodeX = pose->second.nodeX;
+                nodeY = pose->second.nodeY;
+                rot = pose->second.rot;
+            }
         }
-        if (!added && tickCount - it->second.movedTick < st(MOVER_TICKS)) {
+        auto [it, added] = watched.try_emplace(object, Watched { x, y, -MOVER_TICKS });
+        auto& w = it->second;
+        if (added) {
+            w.rot = rot;
+            w.nodeX = nodeX;
+            w.nodeY = nodeY;
+        }
+        if (!added && tickCount - w.movedTick < st(MOVER_TICKS)) {
             buf.sawMover = true;
         }
     }
@@ -1015,23 +1069,47 @@ namespace {
                 continue;
             }
             double rot = object->getRotation();
-            if (object->m_positionX != w.x || object->m_positionY != w.y || rot != w.rot) {
+            auto const& node = object->getPosition();
+            // v2.95: measure the real displacement in world units. Objects moved by
+            // rotate triggers (and skewed views) can move their node while their base
+            // position stays put, so use whichever actually moved.
+            double dx = object->m_positionX - w.x, dy = object->m_positionY - w.y;
+            double ndx = node.x - w.nodeX, ndy = node.y - w.nodeY;
+            double baseUnits = std::hypot(dx, dy), nodeUnits = std::hypot(ndx, ndy);
+            double measured = std::max(baseUnits, nodeUnits);
+            if (dx != 0.0 || dy != 0.0 || ndx != 0.0 || ndy != 0.0 || rot != w.rot) {
                 // called every step, so the change is the movement per step
                 bool consecutive = tickCount - w.movedTick == 1;
                 w.pvx = consecutive ? w.vx : 0.0;
                 w.pvy = consecutive ? w.vy : 0.0;
-                w.vx = object->m_positionX - w.x;
-                w.vy = object->m_positionY - w.y;
-                double dr = rot - w.rot;
-                w.vrot = std::remainder(dr, 360.0);
+                if (nodeUnits > baseUnits) {
+                    w.vx = ndx;
+                    w.vy = ndy;
+                }
+                else {
+                    w.vx = dx;
+                    w.vy = dy;
+                }
+                w.unitSamples[w.unitSampleAt] = measured;
+                w.unitSampleAt = (w.unitSampleAt + 1) % w.unitSamples.size();
+                w.unitSamplesCount = std::min(w.unitSamplesCount + 1, static_cast<int>(w.unitSamples.size()));
+                w.units = motion_policy::steadyUnits(w.unitSamples, w.unitSamplesCount);
+                w.vrot = std::remainder(rot - w.rot, 360.0);
                 w.x = object->m_positionX;
                 w.y = object->m_positionY;
+                w.nodeX = node.x;
+                w.nodeY = node.y;
                 w.rot = rot;
                 w.movedTick = tickCount;
-                movingNow.push_back(object);
+                if (motion_policy::movingInUnits(measured)) {
+                    movingNow.push_back(object);
+                }
             }
             else if (tickCount - w.movedTick > 1) {
-                w.vx = w.vy = w.pvx = w.pvy = w.vrot = 0.0;  // stopped
+                w.vx = w.vy = w.pvx = w.pvy = w.vrot = w.units = 0.0;  // stopped
+                w.unitSamples.fill(0.0);  // don't carry an old speed into its next move
+                w.unitSamplesCount = 0;
+                w.unitSampleAt = 0;
             }
             ++it;
         }
@@ -1047,6 +1125,8 @@ namespace {
     struct Mover {
         GameObject* object;
         double x, y, vx, vy;
+        double units = 0.0;         // v2.95: measured units per step (not a guessed speed)
+        double rot = 0.0;           // v2.95: real rotation before the ghost moved it
         double turn = 0.0;  // radians the motion direction turns per step (0 = straight)
         double rotX = 0.0, rotY = 0.0, vrot = 0.0;  // both axes kept as they were (skewed objects)
         double ax = 0.0, ay = 0.0;  // v2.75: speeding up / slowing down (easing), per step
@@ -1054,8 +1134,12 @@ namespace {
     };
     std::vector<Mover> movers;
 
-    void collectMovers() {
+    void collectMovers(int steps = 0) {
         movers.clear();
+        simPoses.clear();
+        buf.moverCount = 0;
+        buf.moverUnits = 0.f;
+        buf.moverSteps = steps;
         if (!buf.predictMovers) {
             return;
         }
@@ -1065,12 +1149,25 @@ namespace {
                 continue;
             }
             auto const& w = it->second;
-            if ((w.vx != 0.0 || w.vy != 0.0 || w.vrot != 0.0) && tickCount - w.movedTick <= 1) {
-                Mover m { object, object->m_positionX, object->m_positionY, w.vx, w.vy };
-                double speed = std::hypot(w.vx, w.vy);
+            if ((motion_policy::movingInUnits(w.units) || w.vrot != 0.0) && tickCount - w.movedTick <= 1) {
+                // v2.95: start from the real pose, and remember it so watchObject()
+                // cannot mistake the ghost's temporary shift for real movement.
+                simPoses[object] = RealPose { w.x, w.y, w.rot, w.nodeX, w.nodeY };
+                Mover m { object, w.x, w.y, w.vx, w.vy };
+                m.units = w.units;
+                m.rot = w.rot;
+                double rawSpeed = std::hypot(w.vx, w.vy);
+                double speed = w.units > 0.0 ? w.units : rawSpeed;
+                if (rawSpeed > 1e-6 && speed > 0.0 && std::abs(speed - rawSpeed) > 1e-6) {
+                    // Direction comes from the last step, distance from the measured
+                    // median: one snapped step no longer throws the whole projection off.
+                    double scale = speed / rawSpeed;
+                    m.vx *= scale;
+                    m.vy *= scale;
+                }
                 double prev = std::hypot(w.pvx, w.pvy);
                 if (speed > 1e-6 && prev > 1e-6) {
-                    double turn = std::remainder(std::atan2(w.vy, w.vx) - std::atan2(w.pvy, w.pvx), 6.283185307179586);
+                    double turn = std::remainder(std::atan2(m.vy, m.vx) - std::atan2(w.pvy, w.pvx), 6.283185307179586);
                     double ratio = speed / prev;
                     // a steady turn at a steady speed; anything wilder stays a straight line
                     if (std::abs(turn) > 1e-4 && std::abs(turn) < 0.5 && ratio > 0.8 && ratio < 1.25) {
@@ -1078,42 +1175,46 @@ namespace {
                     }
                     // v2.75: straight, but faster or slower than the step before: eased movement
                     else if (std::abs(turn) <= 1e-4 && std::abs(ratio - 1.0) > 1e-3 && ratio > 0.5 && ratio < 2.0) {
-                        m.ax = w.vx - w.pvx;
-                        m.ay = w.vy - w.pvy;
-                        double along = (m.ax * w.vx + m.ay * w.vy) / speed;  // + speeding up, - slowing down
-                        double steps = along < 0.0 ? speed / -along : 2.0 * speed / along;
-                        m.accelSteps = static_cast<int>(std::min(steps, 1000.0));
+                        m.ax = m.vx - w.pvx / prev * speed;
+                        m.ay = m.vy - w.pvy / prev * speed;
+                        double along = (m.ax * m.vx + m.ay * m.vy) / speed;  // + speeding up, - slowing down
+                        double n = along < 0.0 ? speed / -along : 2.0 * speed / along;
+                        m.accelSteps = static_cast<int>(std::min(n, 1000.0));
                     }
                 }
                 m.rotX = object->getRotationX();
                 m.rotY = object->getRotationY();
                 m.vrot = w.vrot;
                 movers.push_back(m);
+                buf.moverUnits = std::max(buf.moverUnits, static_cast<float>(speed));
             }
         }
+        buf.moverCount = static_cast<int>(movers.size());
     }
 
     void placeMovers(int steps) {
         for (auto const& m : movers) {
-            double x = m.x + m.vx * steps;
-            double y = m.y + m.vy * steps;
-            if (m.accelSteps > 0 && steps > 0) {
+            // A single measured velocity is only useful over a limited distance.
+            int projected = steps > 0 ? motion_policy::reliableSteps(m.units, steps) : 0;
+            double x = m.x + m.vx * projected;
+            double y = m.y + m.vy * projected;
+            if (m.accelSteps > 0 && projected > 0) {
                 // eased: the speed keeps changing the same way, then stays (stopped or at 3x)
-                int n = std::min(steps, m.accelSteps);
+                int n = std::min(projected, m.accelSteps);
                 double grow = 0.5 * n * (n + 1);
-                x = m.x + m.vx * steps + m.ax * (grow + static_cast<double>(n) * (steps - n));
-                y = m.y + m.vy * steps + m.ay * (grow + static_cast<double>(n) * (steps - n));
+                x = m.x + m.vx * projected + m.ax * (grow + static_cast<double>(n) * (projected - n));
+                y = m.y + m.vy * projected + m.ay * (grow + static_cast<double>(n) * (projected - n));
             }
-            if (m.turn != 0.0 && steps > 0) {
+            if (m.turn != 0.0 && projected > 0) {
                 // sum of the step vector turned by `turn` once more every step
                 std::complex<double> v { m.vx, m.vy };
                 auto rho = std::polar(1.0, m.turn);
-                auto moved = v * rho * (1.0 - std::pow(rho, steps)) / (1.0 - rho);
+                auto moved = v * rho * (1.0 - std::pow(rho, projected)) / (1.0 - rho);
                 x = m.x + moved.real();
                 y = m.y + moved.imag();
             }
             if (m.vrot != 0.0) {
-                double spun = steps == 0 ? 0.0 : m.vrot * steps;
+                double spun = projected == 0 ? 0.0 : m.vrot * projected;
                 m.object->setRotationX(static_cast<float>(m.rotX + spun));
                 m.object->setRotationY(static_cast<float>(m.rotY + spun));
             }
@@ -1133,7 +1234,10 @@ namespace {
         }
         drift.active = false;
         if (drift.compared >= 8) {
-            say("drift {:.1f}u max at t{} over {}t{}", drift.maxErr, drift.maxAt, drift.compared, why);
+            // v2.95: show the measured movement too, so "the prediction barely moves"
+            // can be told apart from "the real player went somewhere else".
+            say("drift {:.1f}u max at t{} over {}t{} ({:.2f}u/step measured)", drift.maxErr, drift.maxAt, drift.compared, why,
+                buf.unitsPerStep);
         }
     }
 
@@ -1584,7 +1688,7 @@ namespace {
         bool died = false;
         bool safe = false;
 
-        collectMovers();
+        collectMovers(total);
         for (; tick < total; ++tick) {
             if (!movers.empty()) {
                 placeMovers(tick + 1);  // where they'll be after this step
@@ -1750,6 +1854,7 @@ namespace {
         if (!movers.empty()) {
             placeMovers(0);  // back exactly where they were
             movers.clear();
+            simPoses.clear();
         }
         ++buf.simRuns;
         buf.simTicks += tick + 1;
@@ -1945,9 +2050,12 @@ namespace {
     // Full wave look-ahead from the setting (mini = 15 less).
     // v2.94: wave gets the same few frames of tail every other mode has, so an input that only
     // died to the obstacle right behind the one being checked is saved instead of passed.
+    // v2.95: precision adds four frames. Slaughterhouse / Tidal Wave corridors are dense
+    // enough that the next wall sat just past the old horizon, where it read "safe now".
     int fullWaveHorizon(bool mini) {
         int wh = std::clamp(buf.waveHorizon, 20, 160);
-        return st(mini ? std::max(20, wh - 15) : wh) + st(8);
+        int base = st(mini ? std::max(20, wh - 15) : wh);
+        return base + wave_rescue_policy::tail(buf.wavePrecision, st(8));
     }
 
     // v2.6 orb alignment: a press made a little before reaching an orb would be wasted
@@ -2297,7 +2405,8 @@ namespace {
     // as safe. Only crashes you couldn't have turned away from count as deaths.
     // v2.10: three turn points are tried (4, 8 and 12 ticks before the crash) instead of
     // one, so "you could have turned away" is found whenever it's true.
-    constexpr int WAVE_TURN_MARGINS[] = { 4, 8, 12 };
+    // v2.95: precision tries a turn as early as 2 ticks after the input, and requires
+    // 24 ticks (32 inverted) of clearance before calling that crash recoverable.
     constexpr int WAVE_MIN_TURN = 6;      // a turn sooner than this after the input is too fast to count
     constexpr int WAVE_ESCAPE = 16;       // the turn must then survive this many ticks
 
@@ -2306,6 +2415,7 @@ namespace {
     int waveScore(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, int delay, bool down, int horizon, int target,
         SimEnd* end) {
         PortalSafetyGuard portalSafetyGuard;
+        buf.scoreUsedRecovery = false;  // v2.95: this run must say whether it needed a reaction
         int ret = simulateOrbs(layer, p1, p2, dual, delay, down, horizon, -1, target, end);
         if (ret >= target || *end == SimEnd::StopSearch) {
             return ret;
@@ -2314,9 +2424,15 @@ namespace {
         // Apply inverted-wave recovery rules to a predicted gravity transition too,
         // even if the real player was upright at the beginning of the prediction.
         int minimumTurn = prediction_policy::waveMinimumTurn(strict, st(WAVE_MIN_TURN), st(12));
-        int escape = prediction_policy::waveEscape(strict, st(WAVE_ESCAPE), st(24));
-        for (int margin : WAVE_TURN_MARGINS) {
-            int turnAt = ret - st(margin);
+        if (buf.wavePrecision && !strict) {
+            // Inverted / gravity-flipped wave keeps its longer minimum: a 2-tick turn
+            // there is not a realistic reaction from the player.
+            minimumTurn = std::min(minimumTurn, st(wave_rescue_policy::PRECISION_MIN_TURN));
+        }
+        int escape = wave_rescue_policy::recoveryClearance(buf.wavePrecision, strict, st(WAVE_ESCAPE), st(24));
+        int margins = wave_rescue_policy::turnCount(buf.wavePrecision);
+        for (int i = 0; i < margins; ++i) {
+            int turnAt = ret - st(wave_rescue_policy::turnMargin(buf.wavePrecision, i));
             if (turnAt < minimumTurn) {
                 break;
             }
@@ -2324,6 +2440,7 @@ namespace {
             SimEnd turnEnd;
             int turned = simulateOrbs(layer, p1, p2, dual, delay, down, length, turnAt, length, &turnEnd);
             if (turned >= length) {
+                buf.scoreUsedRecovery = true;
                 if (buf.captureKiller && buf.baseEscape < 0) {
                     buf.baseEscape = turnAt;
                     buf.baseCrash = ret;
@@ -3644,6 +3761,10 @@ namespace {
                                  : simulateOrbs(layer, p1, p2, dual, 0, down, horizon, releaseAfter, horizon, &end);
         buf.captureKiller = false;
         buf.trackMovers = false;
+        // v2.95: waveScore may call a straight-fly crash "safe" because you could turn
+        // away from it. Remember that: on a hard corridor the input should be nudged to
+        // a timing that actually clears the wall, not left for a last-frame reaction.
+        bool baseNeedsReaction = cubeStyleWave && base >= horizon && buf.scoreUsedRecovery;
         const int baseOrbs = buf.runOrbs;      // v2.90: orbs the ghost clicked for you in that run
         const int baseHarmless = buf.runHarmless;  // v2.91: hazards it ignored as "you're touching it"
 
@@ -3703,7 +3824,9 @@ namespace {
             // pushed the ship off its line - that is the "it skips my clicks" ship complaint.
             if (buf.robustSaves && !prediction_policy::leaveSafeInput(anyShip, base >= horizon) &&
                 !(anyWave && buf.waveV46) && clickMs() < buf.budgetMs) {
-                float shiftX = std::max(0.3f, 0.5f * (311.58f / 240.f) * (std::abs(p1->m_playerSpeed) / 0.9f));
+                // v2.95: half of the distance the player actually moved in one step,
+                // not half of a nominal 0.9-speed tick (wrong at unlocked FPS / speed portals).
+                float shiftX = motion_policy::robustShift(buf.unitsPerStep, p1->m_playerSpeed);
                 auto holdsUp = [&](int k) {
                     for (float off : { shiftX, -shiftX }) {
                         buf.ghostShiftX = off;
@@ -3724,6 +3847,47 @@ namespace {
                 }
             }
         }
+        // v2.95: "could have turned away" is a real escape, but on a wall-to-wall
+        // section it means every click is a last-frame reaction. Before passing such a
+        // turn through, look a few ticks ahead for a timing that clears the corridor by
+        // itself (checked half a step either way, like any other save). This is what
+        // makes fast wave spam bufferable instead of relying on frame-perfect reactions.
+        if (wave_rescue_policy::centerSafeTurn(buf.wavePrecision && cubeStyleWave, baseNeedsReaction,
+                buf.lowLatency, buf.train) && !fragilePass && clickMs() < buf.budgetMs) {
+            int centerK = 0;
+            float centerShift = motion_policy::robustShift(buf.unitsPerStep, p1->m_playerSpeed);
+            for (int k = 1; k <= std::min(maxDelay, st(wave_rescue_policy::PRECISION_CENTER_WINDOW)); ++k) {
+                bool holds = true;
+                for (float off : { centerShift, -centerShift }) {
+                    buf.ghostShiftX = off;
+                    buf.scoreUsedRecovery = false;
+                    SimEnd e;
+                    int ret = scoreAt(k, horizon, &e);
+                    buf.ghostShiftX = 0.f;
+                    if (ret < horizon || buf.scoreUsedRecovery) {
+                        holds = false;
+                        break;
+                    }
+                }
+                if (holds) {
+                    centerK = k;
+                    break;
+                }
+                if (clickMs() > buf.budgetMs) {
+                    break;
+                }
+            }
+            if (centerK > 0) {
+                noteSave(layer, centerK);
+                say("WAVE center +{}t ({}f): your turn only survived by reacting by t{}, this one clears the {}t look-ahead",
+                    centerK, centerK * TICK, buf.baseEscape, horizon);
+                decided(layer, p1, p2, dual, centerK, down, horizon, releaseAfter);
+                buf.shift = centerK;
+                queueInput(centerK - early, down);
+                return true;
+            }
+        }
+
         if (base >= horizon && !fragilePass) {
             // v2.43 more time at death spots. This input is only safe if your next input comes
             // in time, and level memory has seen you die here repeatedly: try small delays
@@ -3916,8 +4080,10 @@ namespace {
             // v2.88: a best-effort save is only required to survive its own prediction (its crash
             // is a later obstacle by definition), a full save still has to clear the look-ahead.
             int target = lateSave ? landed : needed;
-            // half a tick of x movement: normal speed (0.9) covers 311.58 units a second
-            float shift = std::max(0.3f, 0.5f * (311.58f / 240.f) * (std::abs(p1->m_playerSpeed) / 0.9f));
+            // v2.95: half a step of the movement actually measured this frame. The old
+            // constant assumed 0.9 speed at exactly 240 Hz and tested the wrong spot at
+            // unlocked FPS / after speed portals, which let fragile saves through.
+            float shift = motion_policy::robustShift(buf.unitsPerStep, p1->m_playerSpeed);
             auto robust = [&](int k) {
                 for (float off : { shift, -shift }) {
                     buf.ghostShiftX = off;
@@ -3985,6 +4151,11 @@ namespace {
             : fromMemory ? std::string("  (memory)")
             : cubeStyleWave && marginUsed ? std::string("  +margin")
             : robotPress ? fmt::format("  hold {}t", robotUsedHold) : std::string());
+        // v2.95: show what the movement prediction actually measured, in world units.
+        if (buf.predictMovers && buf.moverCount > 0) {
+            say("movers: {} projected, fastest {:.2f}u per step, {:.1f}u over {} steps", buf.moverCount, buf.moverUnits,
+                motion_policy::projectedUnits(buf.moverUnits, buf.moverSteps), buf.moverSteps);
+        }
         decided(layer, p1, p2, dual, saved, down, horizon, releaseAfter);
         buf.shift = saved;
         queueInput(saved - early, down);
@@ -4017,6 +4188,13 @@ namespace {
         if ((!buf.autoRelease && !buf.robotAutoRelease && !buf.dashAutoRelease) || buf.autoReleased || layer->m_isPlatformer) {
             return;
         }
+        // v2.95: auto-release is on by default now. Two ghost runs every physics step
+        // was a real FPS cost in wave; the window is several ticks, so every other
+        // step still releases on time.
+        if (tickCount - buf.lastAutoCheck < 1) {
+            return;
+        }
+        buf.lastAutoCheck = tickCount;
         if (!layer->m_isPracticeMode && !buf.autoNormalRuns) {
             return;
         }
@@ -4139,6 +4317,7 @@ class BufferMenu : public geode::Popup {
         { "swing-smart", "Smart swing" },
         { "cbf-sync", "CBF sync" },
         { "predict-moving-objects", "Predict moving objects" },
+        { "wave-precision", "Wave precision" },
         { nullptr, "Path view (F10)" },
         { "training-mode", "Training (hints only)" },
         { "death-heatmap", "Death heatmap" },
@@ -4274,7 +4453,12 @@ private:
         mod->setSettingValue<bool>("wave-safety-margin", which != 2);
         mod->setSettingValue<bool>("more-time-death-spots", which != 0);
         mod->setSettingValue<bool>("low-latency", false);
+        // v2.95: every preset keeps the hard-level wave assist; Aggressive also turns
+        // on the two optional motion helpers so dense wave sections get every save.
+        mod->setSettingValue<bool>("wave-precision", true);
         if (which == 2) {
+            mod->setSettingValue<bool>("wave-auto-release", true);
+            mod->setSettingValue<bool>("predict-moving-objects", true);
             mod->setSettingValue<bool>("ship-buffer", true);
             mod->setSettingValue<bool>("performance-mode", false);
             mod->setSettingValue<bool>("training-mode", false);
@@ -4497,6 +4681,13 @@ $on_mod(Loaded) {
         }
         Mod::get()->setSavedValue("orb-window-v282", true);
     }
+    // v2.95: turn on the two assists that make hard wave levels bufferable for
+    // existing installs too. Both are settings, so they can still be switched off.
+    if (!Mod::get()->getSavedValue<bool>("v295-wave-help", false)) {
+        Mod::get()->setSettingValue<bool>("wave-auto-release", true);
+        Mod::get()->setSettingValue<bool>("predict-moving-objects", true);
+        Mod::get()->setSavedValue("v295-wave-help", true);
+    }
     readSettings();
     applyStage();
     if (buf.console) {
@@ -4511,7 +4702,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.85 loaded. F3 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v2.95 loaded. Wave precision + unit-aware prediction on; F3 menu, F6 stage, F10 path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4720,6 +4911,7 @@ class $modify(BufPlayLayer, PlayLayer) {
         benchFinish();
         benchNeedStart = true;
         endAttempt();
+        buf.unitsPerStep = 0.f;  // v2.95: a new attempt starts at a new speed / position
         buf.usedThisAttempt = false;
         buf.shipTapStreak = 0;
         buf.shipStraight = false;
@@ -4863,16 +5055,29 @@ class $modify(BufPlayerObject, PlayerObject) {
         if (isP1) {
             // v2.37: getPosition() is updated every physics step; PlayerObject::m_position lags
             // behind, which kept CBF sync, the drift check, path view and memory slices off.
-            buf.tickStartX = getPosition().x;
+            auto start = getPosition();
+            buf.tickStartX = start.x;
+            buf.tickStartY = start.y;
             buf.inRealUpdate = true;
         }
         PlayerObject::update(dt);
         if (isP1) {
             benchStep(this);
             buf.inRealUpdate = false;
-            float dx = getPosition().x - buf.tickStartX;
+            auto now = getPosition();
+            float dx = now.x - buf.tickStartX;
             if (std::abs(dx) > 0.01f) {
                 buf.tickDx = dx;
+            }
+            // v2.95: measure how many world units the player actually moved this step
+            // (both axes). Prediction slack and the movement model use this instead of
+            // assuming a fixed speed at 240 Hz.
+            float moved = std::hypot(dx, now.y - buf.tickStartY);
+            if (moved > 0.f) {
+                float avg = buf.unitsPerStep;
+                // A speed portal / teleport changes the step length at once; don't
+                // drag the old value through the transition.
+                buf.unitsPerStep = (avg > 0.f && std::abs(moved - avg) < avg * 0.3f) ? avg * 0.8f + moved * 0.2f : moved;
             }
             // The ghost must step with the dt the real player gets. v2.23: with unlocked FPS the
             // step length jitters from frame to frame, so use a running average; a big jump

@@ -42,4 +42,25 @@ int main() {
     portals.clear();
     assert(portals.activate(&portal, false));
     assert(portals.activate(&portal, true));
+
+    // v2.95 wave precision: four more frames of look-ahead, an extra turn point at
+    // two ticks, and a longer clearance before calling a crash recoverable.
+    assert(tail(false, 8) == 8);
+    assert(tail(true, 8) == 24);
+    assert(turnCount(false) == 3);
+    assert(turnCount(true) == 5);
+    assert(turnMargin(true, 0) == 2);
+    assert(turnMargin(false, 0) == 4);
+    assert(recoveryClearance(false, false, 16, 24) == 16);
+    assert(recoveryClearance(false, true, 16, 24) == 24);
+    assert(recoveryClearance(true, false, 16, 24) == 24);
+    assert(recoveryClearance(true, true, 16, 24) == 32);
+    assert(centerSafeTurn(true, true, false, false));
+    assert(!centerSafeTurn(false, true, false, false));
+    assert(!centerSafeTurn(true, false, false, false));
+    assert(!centerSafeTurn(true, true, true, false));
+    assert(!centerSafeTurn(true, true, false, true));
+    assert(PRECISION_CENTER_WINDOW >= 4);
+    assert(clearsNextTurn(true, 24, 0, recoveryClearance(true, false, 16, 24)));
+    assert(!clearsNextTurn(true, 23, 0, recoveryClearance(true, false, 16, 24)));
 }

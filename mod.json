@@ -3,11 +3,11 @@
 	"gd": {
 		"win": "2.2081"
 	},
-	"version": "v2.94.0",
+	"version": "v2.95.0",
 	"id": "basu.input-buffer",
 	"name": "Click Before Frames",
 	"developer": "BASU",
-	"description": "Trajectory-based input buffer: delays early clicks/releases by any number of frames (no cap, same max delay in every gamemode), with orb, pad and portal-aware prediction. github.com/raresdalas1009/-predictive-input-buffer",
+	"description": "Trajectory-based input buffer: delays early clicks/releases by any number of frames (no cap, same max delay in every gamemode), with orb, pad and portal-aware prediction. v2.95 adds wave precision for hard levels and unit-aware movement prediction. github.com/raresdalas1009/-predictive-input-buffer",
 	"settings": {
 		"custom-ticks": {
 			"type": "int",
@@ -54,7 +54,7 @@
 		"wave-horizon": {
 			"type": "int",
 			"name": "Wave lookahead (ticks)",
-			"description": "How far ahead the wave prediction looks (mini wave uses 15 ticks less). 65 = 65 normal / 50 mini. Longer sees crashes further away but costs more time per click.",
+			"description": "How far ahead the wave prediction looks (mini wave uses 15 ticks less). 65 = 65 normal / 50 mini. With Wave precision on, four more frames are added. Longer sees crashes further away but costs more time per click.",
 			"default": 65,
 			"min": 20,
 			"max": 160
@@ -88,8 +88,8 @@
 		"wave-auto-release": {
 			"type": "bool",
 			"name": "Wave auto-release",
-			"description": "While you hold in wave, if holding would crash within the window below and letting go clearly survives, the mod lets go for you. Your own release is then ignored. Practice mode only, unless 'Auto-release in normal runs' is on.",
-			"default": false
+			"description": "While you hold in wave, if holding would crash within the window below and letting go clearly survives, the mod lets go for you. Your own release is then ignored. Practice mode only, unless 'Auto-release in normal runs' is on. v2.95: on by default for hard wave levels; the check runs every other physics step so it does not cost FPS. Turn it off if you want every release to be yours.",
+			"default": true
 		},
 		"auto-release-window": {
 			"type": "int",
@@ -137,6 +137,12 @@
 			"type": "bool",
 			"name": "Wave: safety margin",
 			"description": "When a wave save is found, use a delay with one tick of room on both sides instead of the one that only just clears the spike, so tiny differences in the real run can't clip it. Can add 1 tick (0.25f) to some saves. v2.94: wave also gets the best-effort save (the setting below): when no timing clears the look-ahead, the timing that lives longest is still used if it buys 3 frames over pressing now and dies past the late-crash line. On Tidal Wave style spam, where nothing is ever fully clear, that is the difference between a click that is buffered and one that is not.",
+			"default": true
+		},
+		"wave-precision": {
+			"type": "bool",
+			"name": "Wave precision (hard levels)",
+			"description": "For levels like Slaughterhouse / Tidal Wave: look 4 frames further ahead in wave, check an escape turn as early as 2 ticks after the input, and require 24 ticks (32 inverted) of clearance before calling a crash recoverable. If your turn only survives because you could still react, the buffer looks for a small delay that clears the corridor by itself and uses that instead. Uses the same F6 stage and prediction budget; off keeps the v2.94 rules. Disabled with 'Wave: old v4.6 logic'.",
 			"default": true
 		},
 		"orb-align-ground": {
@@ -215,9 +221,9 @@
 		},
 		"predict-moving-objects": {
 			"type": "bool",
-			"name": "Predict moving objects (experimental)",
-			"description": "Spikes, saws and blocks near your path that are moving right now (move / rotate triggers) are moved along their current motion during predictions: straight lines, curved / circular paths and spinning, so saves account for where they will be. Easing (speeding up / slowing down) isn't predicted. Turn 'Don't buffer near moving objects' off when using this.",
-			"default": false
+			"name": "Predict moving objects",
+			"description": "Spikes, saws and blocks near your path that are moving right now (move / rotate triggers) are moved along their current motion during predictions: straight lines, curved / circular paths and spinning, so saves account for where they will be. v2.95: the motion is measured in world units per physics step from both the object and its node position, rather than guessed from one coordinate; the console says how many units a save projected. Easing (speeding up / slowing down) isn't predicted. Turn 'Don't buffer near moving objects' off when using this.",
+			"default": true
 		},
 		"robust-saves": {
 			"type": "bool",
