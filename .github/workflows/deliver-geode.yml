@@ -1,0 +1,36 @@
+name: Deliver Geode Artifact
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the mod
+        uses: geode-sdk/build-geode-mod@main
+        with:
+          sdk: given
+          combine: true
+  package:
+    name: Package and commit
+    runs-on: ubuntu-latest
+    needs: ['build']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: geode-sdk/build-geode-mod/combine@main
+        id: build
+      - name: Commit the .geode into the branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          GEODE=$(find "${{ steps.build.outputs.build-output }}" -name '*.geode' -type f | head -n 1)
+          test -n "$GEODE"
+          cp "$GEODE" ./BasuInputBuffer.geode
+          git config user.name "Arena Bot"
+          git config user.email "agent@arena.ai"
+          git add -f BasuInputBuffer.geode
+          git commit -m "CI: Windows .geode artifact" || true
+          git push origin "HEAD:${{ github.ref_name }}"
