@@ -25,3 +25,15 @@ jobs:
         with:
           name: Build Output
           path: ${{ steps.build.outputs.build-output }}
+      - name: Commit the .geode artifact into the branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          GEODE=$(find "${{ steps.build.outputs.build-output }}" -name '*.geode' -type f | head -n 1)
+          test -n "$GEODE"
+          cp "$GEODE" ./BasuInputBuffer.geode
+          git config user.name "Arena Bot"
+          git config user.email "agent@arena.ai"
+          git add -f BasuInputBuffer.geode
+          git commit -m "CI: Windows .geode artifact" || true
+          git push origin "HEAD:${{ github.ref_name }}"
