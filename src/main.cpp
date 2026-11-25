@@ -791,8 +791,8 @@ namespace {
         buf.injecting = false;
     }
 
-    // v2.95: the menu always opens paused, and a held bypass key must not stay bypassed behind
-    // the pause menu (a stale "buffer off" while you sit in the menu), so it is released there.
+    // v2.95: the menu always opens paused, and a bypass held while you sit in the pause menu
+    // would be a state you can't see, so it is released as the menu opens.
     void releaseBypassForMenu() {
         if (buf.bypassed) {
             setBypass(false);
