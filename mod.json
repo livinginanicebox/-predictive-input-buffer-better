@@ -3,7 +3,7 @@
 	"gd": {
 		"win": "2.2081"
 	},
-	"version": "v2.94.0",
+	"version": "v2.95.0",
 	"id": "basu.input-buffer",
 	"name": "Click Before Frames",
 	"developer": "BASU",
@@ -321,6 +321,18 @@
 			"type": "bool",
 			"name": "Auto time budget",
 			"description": "Caps each click's prediction time at about one frame at your FPS, and at 4 ms while the game is already dropping frames, so predictions don't make hitches worse. Stages over 16f (64 ticks) are exempt: scanning out to saves that far away takes more than a frame, so those stages use the time budget setting as it is.",
+			"default": true
+		},
+		"key-hold-bypass": {
+			"type": "string",
+			"name": "Key to hold for bypass",
+			"description": "Hold this key to temporarily switch the buffer off and get it straight back when you let go. Nothing is predicted or delayed while it is held, and anything the buffer was still waiting to deliver is dropped (the game gets what you are holding instead). Default TAB. Also accepts F1-F12, a letter (A-Z), a number (0-9), SPACE, SHIFT, CTRL, ALT or a key code as 0x20. Empty or None = no key.",
+			"default": "TAB"
+		},
+		"hold-bypass": {
+			"type": "bool",
+			"name": "Hold key to bypass",
+			"description": "Turn the bypass key above on or off.",
 			"default": true
 		},
 		"menu-theme": {

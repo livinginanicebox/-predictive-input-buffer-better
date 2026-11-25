@@ -1,4 +1,4 @@
-// Click Before Frames v2.94 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
+// Click Before Frames v2.95 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
 // ahead with your input. If the ghost dies, the input is retried with 1..N ticks of
@@ -20,6 +20,7 @@
 #include "prediction_policy.hpp"
 #include "wave_rescue_policy.hpp"
 #include "menu_shortcut.hpp"
+#include "bypass_policy.hpp"
 #include <Geode/Geode.hpp>
 #include <Geode/modify/CCCircleWave.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
@@ -41,6 +42,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cctype>
+#include <cstdlib>
 #include <climits>
 #include <cmath>
 #include <complex>
@@ -192,6 +194,14 @@ namespace {
         double userBudget = 6.0; // v2.75: the budget from the settings (budgetMs is this click's)
         bool autoBudget = true;  // v2.75: budget follows the frame rate
         int keys[5] = { 0, 0, 0, 0, 0 };  // stage, export, console, path, forget
+        int holdKey = 0;         // v2.95: hold this key to bypass the buffer (0 = off)
+        int bypassVk = 0;        // v2.95: same key as a Windows virtual-key code (for polling)
+        bool bypassed = false;   // v2.95: the hold key is down right now
+        bool bypassWanted = false;  // v2.95: settings say the hold key is on
+        bool stageEnabled = true;   // v2.95: what the F6 stage says, regardless of the bypass
+        CCLabelBMFont* bypassLabel = nullptr;  // v2.95: "buffer off" while the bypass key is held
+        std::string holdKeyName;  // v2.95: the bypass key as typed in the settings, for the label
+        menu_shortcut::Counter menuTaps;  // v2.95: 4 quick F3 taps open the menu
         std::unordered_set<GameObject*> simDisabled;  // v2.75: objects a toggle orb switched off in this prediction
         std::deque<std::string> logLines;
 
@@ -329,6 +339,12 @@ namespace {
     } buf;
 
     std::string stageText();
+    void setBypass(bool held);
+    void applyStage();
+    void refreshPanel();
+    void refreshBypassLabel();
+    bool bypassKeyDown();
+    void pollBypass();
 
     // v2.23 unlocked FPS: GD runs round(max(1, frameTime * 240)) physics steps per frame,
     // so only 60 / 120 / 240 FPS give 240 steps a second (144 FPS -> 288, 360 FPS -> 360).
@@ -465,10 +481,27 @@ namespace {
         buf.releaseShift = 0;
     }
 
-    // v2.75: "F6", "G", "7", "None" -> key code (0 = unbound)
+    // v2.75: "F6", "G", "7", "None" -> key code (0 = unbound).
+    // v2.95: also word names for the keys that can't be written as one character (TAB, SPACE,
+    // SHIFT, CTRL, ALT) and a raw GD / Windows key code ("0x09", "9").
     int parseKey(std::string name) {
         for (auto& c : name) {
             c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        if (name == "TAB") {
+            return KEY_Tab;
+        }
+        if (name == "SPACE") {
+            return KEY_Space;
+        }
+        if (name == "SHIFT") {
+            return KEY_Shift;
+        }
+        if (name == "CTRL" || name == "CONTROL") {
+            return KEY_Control;
+        }
+        if (name == "ALT") {
+            return KEY_Alt;
         }
         if (name.size() >= 2 && name[0] == 'F') {
             int n = std::atoi(name.c_str() + 1);
@@ -482,6 +515,15 @@ namespace {
         if (name.size() == 1 && name[0] >= '0' && name[0] <= '9') {
             return KEY_Zero + (name[0] - '0');
         }
+        // v2.95: "0x09", "32": a key typed by its GD / Windows code
+        if (name.rfind("0X", 0) == 0) {
+            int code = static_cast<int>(std::strtol(name.c_str() + 2, nullptr, 16));
+            return code > 0 ? code : 0;
+        }
+        if (name.size() <= 2 && !name.empty() && std::isdigit(static_cast<unsigned char>(name[0]))) {
+            int code = std::atoi(name.c_str());
+            return code > 0 ? code : 0;
+        }
         return 0;
     }
 
@@ -494,6 +536,16 @@ namespace {
         char const* keyNames[] = { "key-stage", "key-export", "key-console", "key-path", "key-forget" };
         for (int i = 0; i < 5; ++i) {
             buf.keys[i] = parseKey(mod->getSettingValue<std::string>(keyNames[i]));
+        }
+        // v2.95: hold this key to bypass the buffer; "None" (or an empty box) turns it off.
+        // GD's key codes for letters / digits / F-keys / Tab / Space are Windows VK codes,
+        // so the same number is what GetAsyncKeyState() needs.
+        buf.bypassWanted = mod->getSettingValue<bool>("hold-bypass");
+        buf.holdKey = buf.bypassWanted ? parseKey(mod->getSettingValue<std::string>("key-hold-bypass")) : 0;
+        buf.bypassVk = buf.holdKey;
+        buf.holdKeyName = mod->getSettingValue<std::string>("key-hold-bypass");
+        if (buf.holdKey == 0 || !bypassKeyDown()) {
+            buf.bypassed = false;
         }
         buf.practiceOnly = mod->getSettingValue<bool>("practice-only");
         buf.groundHorizon = static_cast<int>(mod->getSettingValue<int64_t>("ground-horizon"));
@@ -588,7 +640,10 @@ namespace {
 
     void applyStage() {
         auto const& s = STAGES[buf.stage];
-        buf.enabled = s.enabled;
+        buf.stageEnabled = s.enabled;
+        // v2.95: holding the bypass key is a temporary off switch - the stage itself is
+        // remembered and comes back the moment the key is released.
+        buf.enabled = bypass_policy::bufferActive(s.enabled, buf.bypassed);
         if (s.custom) {
             // v2.78: one custom value for every gamemode (wave and ship included), no cap
             // besides the MAX_TICKS safety ceiling so a typed-in huge number can't overflow.
@@ -649,6 +704,14 @@ namespace {
     }
 
     std::string stageText() {
+        // v2.95: the bypass is shown as temporary, and the stage it comes back to is named
+        if (buf.bypassed && buf.stageEnabled) {
+            if (STAGES[buf.stage].unlimited) {
+                return "Buffer: OFF (holding bypass) - unlimited when released";
+            }
+            return fmt::format("Buffer: OFF (holding bypass) - {:g}f when released{}", buf.ticksAll * TICK,
+                STAGES[buf.stage].custom ? " (custom)" : "");
+        }
         if (!buf.enabled) {
             return "Buffer: OFF";
         }
@@ -676,6 +739,10 @@ namespace {
         buf.panel = nullptr;
         buf.panelTitle = nullptr;
         buf.panelLines.clear();
+        // v2.95: the bypass never survives a level (the label went with the PlayLayer, and a
+        // key held across a restart / level change isn't a deliberate bypass)
+        buf.bypassLabel = nullptr;
+        buf.bypassed = false;
         buf.pathNode = nullptr;
         buf.simulating = false;
         buf.injecting = false;
@@ -727,6 +794,81 @@ namespace {
         buf.appliedInput = down;
         layer->handleButton(down, 1, buf.isPlayer1);
         buf.injecting = false;
+    }
+
+    // v2.95: the menu always opens paused, and a held bypass key must not stay bypassed behind
+    // the pause menu (a stale "buffer off" while you sit in the menu), so it is released there.
+    void releaseBypassForMenu() {
+        if (buf.bypassed) {
+            setBypass(false);
+        }
+    }
+
+    // v2.95 Tab bypass: hand the game exactly what you are holding right now and drop anything
+    // the buffer was still waiting to deliver. Predictions stay off until the key is released,
+    // then the same stage and settings are simply back.
+    void setBypass(bool held) {
+        if (buf.bypassed == held) {
+            return;
+        }
+        bool wasOn = buf.enabled;
+        buf.bypassed = held;
+        resetPending();
+        buf.autoReleased = false;
+        buf.autoDash = false;
+        buf.rapid = 0;
+        buf.sinceInput = 999;
+        applyStage();
+        // a path the buffer drew must not stay on screen while it is bypassed
+        if (buf.pathNode) {
+            buf.pathNode->clear();
+        }
+        auto* layer = GameManager::get()->m_playLayer;
+        if (layer && buf.appliedInput != buf.realInput) {
+            sendButton(layer, buf.realInput);
+        }
+        refreshBypassLabel();
+        if (!wasOn && buf.enabled) {
+            say("bypass released: {}", stageText());
+        }
+        else if (wasOn && !buf.enabled) {
+            say("bypass held: {}", stageText());
+        }
+        refreshPanel();
+    }
+
+    // Windows key state for the bypass key (GD's key codes are Windows virtual-key codes, so
+    // the same number works here). Only polled while a bypass is active and a level is loaded.
+    bool bypassKeyDown() {
+        if (buf.holdKey == 0) {
+            return false;
+        }
+        return (GetAsyncKeyState(buf.bypassVk) & 0x8000) != 0;
+    }
+
+    // v2.95: a small "BUFFER OFF" tag under the level while the bypass key is held, so the
+    // temporary off switch is visible without opening anything. Only touched when it changes.
+    void refreshBypassLabel() {
+        if (!buf.bypassLabel) {
+            return;
+        }
+        bool show = buf.bypassed;
+        buf.bypassLabel->setVisible(show);
+        if (show) {
+            buf.bypassLabel->setString(fmt::format("BUFFER OFF (holding {})", buf.holdKeyName).c_str());
+        }
+    }
+
+    // Called once per physics step. The keyboard event path already reacts to the press; this
+    // catches a key-up that never arrived (alt-tab while holding Tab), which would otherwise
+    // leave the buffer bypassed for good. It never starts a bypass on its own.
+    void pollBypass() {
+        if (!buf.bypassed) {
+            return;
+        }
+        if (!buf.bypassWanted || buf.holdKey == 0 || !bypassKeyDown()) {
+            setBypass(false);
+        }
     }
 
     void pressGhost(PlayerObject* ghost, bool down) {
@@ -4004,6 +4146,8 @@ namespace {
         }
         applyStage();
         readSettings();
+        // v2.95: a bypass that is still held survives the stage change: readSettings() only
+        // drops it when the key is really up (or the bypass key was switched off / rebound).
         saveProfile();
         say("F6 -> {}", stageText());
         refreshPanel();
@@ -4119,7 +4263,7 @@ namespace {
     }
 }
 
-// In-game menu: F3 in a level. Stage, the main switches,
+// In-game menu: F3 four times in a level. Stage, the main switches,
 // status, and shortcuts to all settings / copy log / forget level.
 class BufferMenu : public geode::Popup {
     struct Option {
@@ -4511,7 +4655,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.85 loaded. F3 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v2.95 loaded. F3 x4 opens the menu, hold Tab to bypass the buffer, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4659,7 +4803,7 @@ class $modify(BufPlayLayer, PlayLayer) {
             buf.panelLines.push_back(line);
         }
 
-        auto* hint = CCLabelBMFont::create("F6 stage  F3 menu  F8 copy log  F9 console  F10 path  F11 forget", "chatFont.fnt");
+        auto* hint = CCLabelBMFont::create("F6 stage  F3x4 menu  hold Tab bypass  F8 copy log  F9 console  F10 path  F11 forget", "chatFont.fnt");
         hint->setScale(0.45f);
         hint->setColor({ 160, 190, 255 });
         hint->setAnchorPoint({ 0.5f, 0.5f });
@@ -4677,6 +4821,16 @@ class $modify(BufPlayLayer, PlayLayer) {
         buf.hintLabel->setPosition({ win.width / 2.f, win.height - 40.f });
         buf.hintLabel->setZOrder(1000);
         this->addChild(buf.hintLabel);
+
+        // v2.95: "BUFFER OFF (holding Tab)" while the bypass key is held. Hidden by default.
+        buf.bypassLabel = CCLabelBMFont::create("", "bigFont.fnt");
+        buf.bypassLabel->setColor({ 255, 220, 140 });
+        buf.bypassLabel->setScale(0.5f);
+        buf.bypassLabel->setPosition({ win.width / 2.f, win.height - 64.f });
+        buf.bypassLabel->setZOrder(1000);
+        buf.bypassLabel->setVisible(false);
+        this->addChild(buf.bypassLabel);
+        refreshBypassLabel();
 
         buf.heatNode = nullptr;
         if (m_progressBar) {
@@ -4710,6 +4864,7 @@ class $modify(BufPlayLayer, PlayLayer) {
         saveProfile();
         restoreGlobals();
         buf.hintLabel = nullptr;
+        buf.bypassLabel = nullptr;
         buf.heatNode = nullptr;
         memoryKey.clear();
         dropGhosts();
@@ -4836,6 +4991,9 @@ class $modify(BufPlayerObject, PlayerObject) {
         if (layer && this == layer->m_player1) {
             ++tickCount;
             ++logClock;
+            // v2.95: the bypass key is read from the OS every step, so a key-up lost while the
+            // game was out of focus still brings the buffer straight back.
+            pollBypass();
             if (buf.enabled) {
                 buf.usedThisAttempt = true;
             }
@@ -5011,14 +5169,26 @@ class $modify(BufPlayerObject, PlayerObject) {
 class $modify(BufKeyboard, CCKeyboardDispatcher) {
     bool dispatchKeyboardMSG(enumKeyCodes key, bool isKeyDown, bool isKeyRepeat, double timestamp) {
         auto* layer = GameManager::get()->m_playLayer;
-        // v2.85: the menu opens with plain F3 (it used to need Alt+F10). F10 stays the
-        // path-view toggle, so the two never collide.
-        if (menu_shortcut::shouldOpen(key == KEY_F3, isKeyDown, isKeyRepeat, layer != nullptr)) {
+        // v2.95: F3 four times in quick succession opens the menu (was a single F3 press).
+        // One press now does nothing, so a stray F3 while playing can't pause the level.
+        bool opened = false;
+        buf.menuTaps.feed(key == KEY_F3, isKeyDown, isKeyRepeat, layer != nullptr,
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(), opened);
+        if (opened) {
+            releaseBypassForMenu();
             if (!layer->m_isPaused) {
                 layer->pauseGame(true);
             }
             BufferMenu::open();
             return true;
+        }
+        if (!isKeyRepeat && buf.holdKey != 0 && static_cast<int>(key) == buf.holdKey) {
+            // v2.95: hold Tab to bypass the buffer, let go to get it back. Only in a level, and
+            // the event is still passed on so nothing else that listens loses its key state.
+            if (layer) {
+                setBypass(isKeyDown);
+            }
+            return CCKeyboardDispatcher::dispatchKeyboardMSG(key, isKeyDown, isKeyRepeat, timestamp);
         }
         if (isKeyDown && !isKeyRepeat && layer) {
             int k = static_cast<int>(key);
