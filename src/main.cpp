@@ -199,8 +199,6 @@ namespace {
         bool bypassed = false;   // v2.95: the hold key is down right now
         bool bypassWanted = false;  // v2.95: settings say the hold key is on
         bool stageEnabled = true;   // v2.95: what the F6 stage says, regardless of the bypass
-        CCLabelBMFont* bypassLabel = nullptr;  // v2.95: "buffer off" while the bypass key is held
-        std::string holdKeyName;  // v2.95: the bypass key as typed in the settings, for the label
         menu_shortcut::Counter menuTaps;  // v2.95: 4 quick F3 taps open the menu
         std::unordered_set<GameObject*> simDisabled;  // v2.75: objects a toggle orb switched off in this prediction
         std::deque<std::string> logLines;
@@ -342,7 +340,6 @@ namespace {
     void setBypass(bool held);
     void applyStage();
     void refreshPanel();
-    void refreshBypassLabel();
     bool bypassKeyDown();
     void pollBypass();
 
@@ -543,7 +540,6 @@ namespace {
         buf.bypassWanted = mod->getSettingValue<bool>("hold-bypass");
         buf.holdKey = buf.bypassWanted ? parseKey(mod->getSettingValue<std::string>("key-hold-bypass")) : 0;
         buf.bypassVk = buf.holdKey;
-        buf.holdKeyName = mod->getSettingValue<std::string>("key-hold-bypass");
         if (buf.holdKey == 0 || !bypassKeyDown()) {
             buf.bypassed = false;
         }
@@ -739,9 +735,8 @@ namespace {
         buf.panel = nullptr;
         buf.panelTitle = nullptr;
         buf.panelLines.clear();
-        // v2.95: the bypass never survives a level (the label went with the PlayLayer, and a
-        // key held across a restart / level change isn't a deliberate bypass)
-        buf.bypassLabel = nullptr;
+        // v2.95: the bypass never survives a level (a key held across a restart / level change
+        // isn't a deliberate bypass)
         buf.bypassed = false;
         buf.pathNode = nullptr;
         buf.simulating = false;
@@ -827,7 +822,6 @@ namespace {
         if (layer && buf.appliedInput != buf.realInput) {
             sendButton(layer, buf.realInput);
         }
-        refreshBypassLabel();
         if (!wasOn && buf.enabled) {
             say("bypass released: {}", stageText());
         }
@@ -844,19 +838,6 @@ namespace {
             return false;
         }
         return (GetAsyncKeyState(buf.bypassVk) & 0x8000) != 0;
-    }
-
-    // v2.95: a small "BUFFER OFF" tag under the level while the bypass key is held, so the
-    // temporary off switch is visible without opening anything. Only touched when it changes.
-    void refreshBypassLabel() {
-        if (!buf.bypassLabel) {
-            return;
-        }
-        bool show = buf.bypassed;
-        buf.bypassLabel->setVisible(show);
-        if (show) {
-            buf.bypassLabel->setString(fmt::format("BUFFER OFF (holding {})", buf.holdKeyName).c_str());
-        }
     }
 
     // Called once per physics step. The keyboard event path already reacts to the press; this
@@ -4822,16 +4803,6 @@ class $modify(BufPlayLayer, PlayLayer) {
         buf.hintLabel->setZOrder(1000);
         this->addChild(buf.hintLabel);
 
-        // v2.95: "BUFFER OFF (holding Tab)" while the bypass key is held. Hidden by default.
-        buf.bypassLabel = CCLabelBMFont::create("", "bigFont.fnt");
-        buf.bypassLabel->setColor({ 255, 220, 140 });
-        buf.bypassLabel->setScale(0.5f);
-        buf.bypassLabel->setPosition({ win.width / 2.f, win.height - 64.f });
-        buf.bypassLabel->setZOrder(1000);
-        buf.bypassLabel->setVisible(false);
-        this->addChild(buf.bypassLabel);
-        refreshBypassLabel();
-
         buf.heatNode = nullptr;
         if (m_progressBar) {
             buf.heatNode = CCDrawNode::create();
@@ -4864,7 +4835,6 @@ class $modify(BufPlayLayer, PlayLayer) {
         saveProfile();
         restoreGlobals();
         buf.hintLabel = nullptr;
-        buf.bypassLabel = nullptr;
         buf.heatNode = nullptr;
         memoryKey.clear();
         dropGhosts();
