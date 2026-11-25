@@ -1,8 +1,17 @@
 #name: Build Mod
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Attach the built .geode to a GitHub release'
+        type: boolean
+        default: true
   push:
     branches: [main]
+
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Windows
@@ -19,9 +28,31 @@ jobs:
     runs-on: ubuntu-latest
     needs: ['build']
     steps:
+      - uses: actions/checkout@v4
       - uses: geode-sdk/build-geode-mod/combine@main
         id: build
       - uses: actions/upload-artifact@v4
         with:
           name: Build Output
           path: ${{ steps.build.outputs.build-output }}
+      - name: Read the mod version
+        id: version
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          mod = json.load(open('mod.json'))
+          print('version=' + mod['version'])
+          print('name=' + mod['name'])
+          PY
+      - name: List the built files
+        run: ls -la "${{ steps.build.outputs.build-output }}"
+      - name: Publish the .geode
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.name }} ${{ steps.version.outputs.version }}
+          files: ${{ steps.build.outputs.build-output }}/*.geode
+          fail_on_unmatched_files: true
+          draft: false
+          generate_release_notes: true
