@@ -1,5 +1,8 @@
 # Click Before Frames (Geode)
 
+## Download
+Built `.geode` files are attached to the [latest release](https://github.com/livinginanicebox/-predictive-input-buffer-better/releases/latest) (`basu.input-buffer.geode`) - drop it in your Geode mods folder. The build workflow publishes a release for you: run **Build Mod** from the Actions tab with *publish* on, and the combined .geode lands on a release tagged with `mod.json`'s version.
+
 ## Keys
 F6 cycle stage | F3 x4 menu | hold Tab to bypass the buffer | F8 copy the console log | F9 open/close the in-game console | F10 path view | F11 forget this level's memory
 
