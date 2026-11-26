@@ -1,4 +1,4 @@
-// Click Before Frames v2.95 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
+// Click Before Frames v3.0 (GD 2.2091 / Geode v6; cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
 // ahead with your input. If the ghost dies, the input is retried with 1..N ticks of
@@ -36,9 +36,13 @@
 #include <map>
 #include <Geode/modify/PlayerObject.hpp>
 #include <Geode/modify/RingObject.hpp>
-#include <Windows.h>
+#include <Windows.h>  // GetAsyncKeyState for the bypass key
+// v3.0 (Geode v6): v6 cut back the transitive includes Geode headers used to pull in, so the
+// standard library headers this file actually uses are now included explicitly.
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cctype>
@@ -46,13 +50,27 @@
 #include <climits>
 #include <cmath>
 #include <complex>
+#include <cstring>
 #include <deque>
-#include <filesystem>
+#include <fmt/format.h>
 #include <functional>
-#include <fstream>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <numeric>
+#include <optional>
+#include <set>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
+#include <asp/fs/fs.hpp>
+#include <Geode/utils/file.hpp>
 
 using namespace geode::prelude;
 
@@ -693,9 +711,7 @@ namespace {
         }
 
         bool copied = geode::utils::clipboard::write(text);
-        std::error_code ec;
-        std::filesystem::create_directories(mod->getSaveDir(), ec);
-        std::ofstream(mod->getSaveDir() / "console-export.txt", std::ios::trunc) << text;
+        writeTextFile(mod->getSaveDir() / "console-export.txt", text);
         say("console {} ({} lines) + saved to console-export.txt", copied ? "copied to clipboard" : "NOT copied", exportLines.size());
     }
 
@@ -912,6 +928,8 @@ namespace {
         // state the PREVIOUS simulation left it in (usually "held"), so on some clicks
         // its pushButton() is a no-op or it auto-jumps from hold, and the prediction
         // flips between right and wrong from click to click.
+        // v3.0: 2.2091 made m_holdingButtons a std::map<int, bool> instead of a bitfield-ish
+        // uint8, so it is copied as a container (still plain old data, no allocation churn).
         ghost->m_holdingButtons = real->m_holdingButtons;
         ghost->m_jumpBuffered = real->m_jumpBuffered;
         ghost->m_wasJumpBuffered = real->m_wasJumpBuffered;
@@ -1014,8 +1032,9 @@ namespace {
         ghost->m_affectedByForces = real->m_affectedByForces;
         ghost->m_stateBoostX = real->m_stateBoostX;
         ghost->m_stateBoostY = real->m_stateBoostY;
-        ghost->m_stateNoStickX = real->m_stateNoStickX;
-        ghost->m_stateNoStickY = real->m_stateNoStickY;
+        // v3.0: 2.2091 replaced the two unsigned-char m_stateNoStickX/Y stick counters
+        // with a single int m_stateNoWallPush counter, so the ghost carries that instead.
+        ghost->m_stateNoWallPush = real->m_stateNoWallPush;
         ghost->m_stateHitHead = real->m_stateHitHead;
         ghost->m_stateNoAutoJump = real->m_stateNoAutoJump;
         ghost->m_stateScale = real->m_stateScale;
@@ -1328,7 +1347,7 @@ namespace {
         return sum;
     }
 
-    std::filesystem::path memoryFile() {
+    asp::fs::Path memoryFile() {
         // v2.37: slices keyed by the real position. v2.75: _v3, a fresh start after the
         // prediction fixes of v2.61-v2.74 (old files learned from the buggy versions)
         return Mod::get()->getSaveDir() / "memory" / (memoryKey + "_v3.txt");
@@ -1342,12 +1361,11 @@ namespace {
         if (!memoryDirty || memoryKey.empty()) {
             return;
         }
-        std::error_code ec;
-        std::filesystem::create_directories(memoryFile().parent_path(), ec);
-        std::ofstream out(memoryFile(), std::ios::trunc);
+        std::string text;
         for (auto const& [slice, spot] : memory) {
-            out << slice << ' ' << spot.ok << ' ' << spot.bad << ' ' << spot.deaths << ' ' << spot.delaySum << '\n';
+            text += fmt::format("{} {} {} {} {}\n", slice, spot.ok, spot.bad, spot.deaths, spot.delaySum);
         }
+        writeTextFile(memoryFile(), text);
         memoryDirty = false;
     }
 
@@ -1373,7 +1391,7 @@ namespace {
             }
             memoryKey = "local_" + name;
         }
-        std::ifstream in(memoryFile());
+        std::istringstream in(readTextFile(memoryFile()));
         int slice;
         Spot spot;
         while (in >> slice >> spot.ok >> spot.bad >> spot.deaths >> spot.delaySum) {
@@ -1382,9 +1400,9 @@ namespace {
         // v2.75: memory fades. Opened again more than 12 hours later, everything learned counts
         // a quarter less (the average delay at a spot stays the same), so old mistakes and
         // old death spots don't stick forever.
-        std::error_code ec;
-        auto written = std::filesystem::last_write_time(memoryFile(), ec);
-        if (!ec && std::filesystem::file_time_type::clock::now() - written > std::chrono::hours(12)) {
+        auto meta = asp::fs::metadata(memoryFile());
+        auto written = meta.isOk() ? meta.unwrap().modifiedAt : std::nullopt;
+        if (written && written->elapsed().hours() >= 12) {
             for (auto it = memory.begin(); it != memory.end();) {
                 auto& s = it->second;
                 uint32_t ok = s.ok * 3 / 4;
@@ -2735,6 +2753,42 @@ namespace {
         return ret;
     }
 
+    // v3.0 (Geode v6): std::filesystem is gone, Geode paths are asp::fs::Path. These three
+    // helpers keep the text files this mod writes (level memory, run-check bench, console
+    // export) a couple of lines each instead of repeating the asp error handling everywhere.
+    void ensureDir(asp::fs::PathView dir) {
+        if (!dir.empty()) {
+            (void)asp::fs::createDirAll(dir);
+        }
+    }
+
+    // Whole file as text, or "" when it isn't there.
+    std::string readTextFile(asp::fs::PathView path) {
+        if (!asp::fs::exists(path)) {
+            return {};
+        }
+        auto data = asp::fs::readToString(path);
+        return data.isOk() ? data.unwrap() : std::string();
+    }
+
+    // Overwrites the file (creating it and its folder).
+    void writeTextFile(asp::fs::PathView path, std::string const& text) {
+        if (auto parent = path.parent()) {
+            ensureDir(*parent);
+        }
+        (void)asp::fs::write(path, std::string_view(text));
+    }
+
+    // Appends one line, creating the file if needed.
+    void appendTextFile(asp::fs::PathView path, std::string const& text) {
+        if (auto parent = path.parent()) {
+            ensureDir(*parent);
+        }
+        std::string all = readTextFile(path);
+        all += text;
+        (void)asp::fs::write(path, std::string_view(all));
+    }
+
     bool marginUsed = false;  // the last wave save took the +1 tick safety margin
 
     int searchWave(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, bool down, int horizon, int maxDelay,
@@ -2880,12 +2934,12 @@ namespace {
     bool benchPending = false;    // "Check run" was pressed
     std::string lastBench;        // last result, for the stats popup
 
-    std::filesystem::path benchFile() {
+    asp::fs::Path benchFile() {
         return Mod::get()->getSaveDir() / "bench" / (memoryKey + ".txt");
     }
 
     size_t benchSavedTicks() {
-        std::ifstream in(benchFile());
+        std::istringstream in(readTextFile(benchFile()));
         float x, y, dt;
         size_t ticks = 0;
         if (in >> x >> y >> dt >> ticks) {
@@ -2895,7 +2949,7 @@ namespace {
     }
 
     bool benchLoad(BenchRun& r) {
-        std::ifstream in(benchFile());
+        std::istringstream in(readTextFile(benchFile()));
         size_t ticks = 0, inputs = 0;
         if (!(in >> r.startX >> r.startY >> r.dt >> ticks >> inputs)) {
             return false;
@@ -2968,16 +3022,14 @@ namespace {
             return;
         }
         benchBestDirty = false;
-        std::error_code ec;
-        std::filesystem::create_directories(benchFile().parent_path(), ec);
-        std::ofstream out(benchFile(), std::ios::trunc);
-        out << benchBest.startX << ' ' << benchBest.startY << ' ' << benchBest.dt << ' ' << benchBest.track.size() << ' '
-            << benchBest.inputs.size() << '\n';
+        std::string text;
+        text += fmt::format("{} {} {} {} {}\n", benchBest.startX, benchBest.startY, benchBest.dt, benchBest.track.size(),
+            benchBest.inputs.size());
         for (auto const& [t, d] : benchBest.inputs) {
-            out << t << ' ' << (d ? 1 : 0) << '\n';
+            text += fmt::format("{} {}\n", t, d ? 1 : 0);
         }
         for (auto const& p : benchBest.track) {
-            out << p.x << ' ' << p.y << '\n';
+            text += fmt::format("{} {}\n", p.x, p.y);
         }
     }
 
@@ -3046,10 +3098,8 @@ namespace {
             100.0 * matched / r.track.size(), end);
         say("run check: {} | max error {:.1f}u{} | {:.0f} ms", lastBench, maxErr,
             std::abs(r.dt - buf.tickLength) > 1e-4f ? " | recorded at another frame rate" : "", ms);
-        std::error_code ec;
-        std::filesystem::create_directories(Mod::get()->getSaveDir(), ec);
-        std::ofstream(Mod::get()->getSaveDir() / "run-check-results.txt", std::ios::app)
-            << Mod::get()->getVersion().toVString() << ' ' << memoryKey << ": " << lastBench << '\n';
+        appendTextFile(Mod::get()->getSaveDir() / "run-check-results.txt",
+            fmt::format("{} {}: {}\n", Mod::get()->getVersion().toVString(), memoryKey, lastBench));
     }
 
     // v2.65 live path (F10): between clicks the path keeps updating (v2.70: 20 times a second):
@@ -4454,8 +4504,12 @@ protected:
         if (!Popup::init(380.f, 412.f, "GJ_square04.png")) {
             return false;
         }
-        m_bgSprite->setColor(m_t.bg);
+        if (m_bgSprite) {
+            m_bgSprite->setColor(m_t.bg);
+        }
         this->setTitle("Click Before Frames");
+        // v3.0 (Geode v6): Popup::m_title is a geode::Label now (was a CCLabelBMFont);
+        // setColor still works because Label implements cocos2d::CCRGBAProtocol.
         if (m_title) {
             m_title->setColor(m_t.soft);
         }
@@ -4688,8 +4742,9 @@ class $modify(BufPlayLayer, PlayLayer) {
         finishDrift(" (died)");
     }
 
-    bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
-        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) {
+    // v3.0: 2.2091 dropped PlayLayer::init's useReplay argument.
+    bool init(GJGameLevel* level, bool dontCreateObjects) {
+        if (!PlayLayer::init(level, dontCreateObjects)) {
             return false;
         }
         dropGhosts();
@@ -4892,7 +4947,7 @@ class $modify(BufEffectGameObject, EffectGameObject) {
         (void)self.setHookPriority("EffectGameObject::triggerObject", HOOK_PRIORITY);
     }
 
-    void triggerObject(GJBaseGameLayer* layer, int uniqueID, gd::vector<int> const* remapKeys) {
+    void triggerObject(GJBaseGameLayer* layer, int uniqueID, std::vector<int> const* remapKeys) {
         if (buf.simulating) {
             return;
         }
@@ -5242,12 +5297,12 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
         return GJBaseGameLayer::canBeActivatedByPlayer(player, object);
     }
 
-    void collisionCheckObjects(PlayerObject* player, gd::vector<GameObject*>* objects, int objectCount, float dt) {
+    void collisionCheckObjects(PlayerObject* player, std::vector<GameObject*>* objects, int objectCount, float dt) {
         if (!buf.simulating) {
             GJBaseGameLayer::collisionCheckObjects(player, objects, objectCount, dt);
             return;
         }
-        static gd::vector<GameObject*> relevant;
+        static std::vector<GameObject*> relevant;
         relevant.clear();
         if (static_cast<int>(relevant.capacity()) < objectCount) {
             relevant.reserve(objectCount);
@@ -5425,7 +5480,7 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
     // Toggle orbs, orbs / pads / collectibles with groups, item and counter triggers could
     // otherwise toggle or spawn groups and change item counters for real (once per
     // prediction run, many times a click), which broke triggers in some levels.
-    void toggleGroupTriggered(int group, bool activate, gd::vector<int> const& remapKeys, int triggerID, int controlID) {
+    void toggleGroupTriggered(int group, bool activate, std::vector<int> const& remapKeys, int triggerID, int controlID) {
         if (buf.simulating) {
             // v2.75: a toggle orb that switches a group off: the ghost stops colliding with
             // that group for the rest of this prediction (the real objects aren't touched)
@@ -5441,7 +5496,7 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
         GJBaseGameLayer::toggleGroupTriggered(group, activate, remapKeys, triggerID, controlID);
     }
 
-    void spawnGroup(int group, bool ordered, double delay, gd::vector<int> const& remapKeys, int triggerID, int controlID) {
+    void spawnGroup(int group, bool ordered, double delay, std::vector<int> const& remapKeys, int triggerID, int controlID) {
         if (buf.simulating) {
             return;
         }
@@ -5476,7 +5531,7 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
         GJBaseGameLayer::activateItemEditTrigger(object);
     }
 
-    void activateItemCompareTrigger(ItemTriggerGameObject* object, gd::vector<int> const& remapKeys) {
+    void activateItemCompareTrigger(ItemTriggerGameObject* object, std::vector<int> const& remapKeys) {
         if (buf.simulating) {
             return;
         }
