@@ -33,12 +33,14 @@ jobs:
           export CLI_PROFILE="$GITHUB_WORKSPACE/cli-profile"
           mkdir -p "$CLI_PROFILE/geode/mods"
           geode profile add --name GithubActions "$CLI_PROFILE/GeometryDash.exe" win
+          exec > >(tee sdk.log) 2>&1
           geode sdk install "$GITHUB_WORKSPACE/geode-sdk-clone"
           echo "GEODE_SDK=$GITHUB_WORKSPACE/geode-sdk-clone" >> $GITHUB_ENV
           TARGET_GEODE_VERSION=$(jq -r '.geode' mod.json)
           echo "target geode=[$TARGET_GEODE_VERSION]"
-          geode sdk update "v$TARGET_GEODE_VERSION"
-          geode sdk install-binaries --platform win --version "v$TARGET_GEODE_VERSION"
+          geode sdk update "$TARGET_GEODE_VERSION"
+          geode sdk install-binaries --platform win --version "$TARGET_GEODE_VERSION"
+          ls -la "$GITHUB_WORKSPACE/geode-sdk-clone/bin" || true
           echo "CPM_SOURCE_CACHE=$GITHUB_WORKSPACE/cpm-cache" >> $GITHUB_ENV
         continue-on-error: true
       - name: Configure and build
@@ -53,6 +55,11 @@ jobs:
             -G Ninja -DGEODE_DONT_INSTALL_MODS=ON -DGEODE_TARGET_PLATFORM=Win64 2>&1 | tee configure.log
           cmake --build build --config Release --parallel 2>&1 | tee build.log
         continue-on-error: true
+      - name: Env probe
+        if: always()
+        shell: bash
+        run: |
+          { echo "GEODE_SDK=$GEODE_SDK"; ls -R "$GITHUB_WORKSPACE/geode-sdk-clone/bin" 2>/dev/null | head -40; } > binprobe.txt
       - name: Relay errors
         if: always()
         shell: bash
@@ -61,7 +68,7 @@ jobs:
           BUILD_OUTCOME: ${{ steps.build.outcome }}
         run: |
           mkdir -p buildlogs
-          cp configure.log build.log buildlogs/ 2>/dev/null || true
+          cp configure.log build.log sdk.log binprobe.txt buildlogs/ 2>/dev/null || true
           echo "sdk=$SDK_OUTCOME build=$BUILD_OUTCOME" > buildlogs/status.txt
           python3 scripts/relay_log.py > buildlogs/summary.txt || true
       - name: Commit the logs back
