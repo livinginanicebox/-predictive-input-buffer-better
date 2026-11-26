@@ -15,18 +15,24 @@ actually live, and the one that lives longest is what the game is then told to d
 - `Survival scan: how far ahead` is 2400 ticks by default, i.e. 10 seconds of ghost ticks, and a
   scan never costs more than that in total: the action you are already doing runs first and the
   other two stop as soon as they beat it.
+- It only steps in when what you are doing **dies soon** - inside `Survival scan: only step in when
+  you die within`, 1 second by default - and when another input lives at least 12 ticks (3 frames)
+  longer. If nothing is imminent it does nothing at all and the game follows what you are really
+  holding, so the button is never pressed for no reason.
 - Your own click always wins: it cancels the pick and goes through the normal buffer, and the
   next scan re-decides from there.
 - It follows the practice-mode gate, is off in platformer and two-player levels, and stays quiet -
   no on-screen text. A scan that costs more than the click budget quietly runs less often.
+- `Survival scan: may press for you` off makes it a pure auto-release (it can only let go, never press
+  or tap on its own); on (default) it may also hold or tap when that clearly lives longer.
 - Turn it off with the 'Auto survival' setting; horizon and stride are the perf knobs.
 
 Practice use only; do not use for verified or leaderboard runs. Auto-input features can act without an on-screen watermark.
 
-## Geometry Dash 2.2091 (Geode v6, v2.97)
+## Geometry Dash 2.2091 (Geode v6, v2.97.1)
 This build targets **Geometry Dash 2.2091** with **Geode 6.0.0 or newer**; it no longer loads on 2.2081. The 2.2091 port is a compatibility update, not a change of prediction rules - all v2.94 behaviour is the same.
 
-A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v2.97.0, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
+A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v2.97.1, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
 
 - 2.209 removed the replay path: `PlayLayer::init` is `(GJGameLevel*, bool dontCreateObjects)` now, so the level hook follows that signature.
 - Geode v6 dropped the `gd::` namespace (`gd::vector` is `std::vector`), and `Mod::getSaveDir()` returns an `asp::fs::Path`. Saved level memory, run-check recordings and `console-export.txt` still live in the same folder; the path is converted through its native form so Windows user names outside the ANSI codepage keep working.
@@ -146,3 +152,7 @@ The ghost copies the player's gravity and direction for both upright and upside-
   that lives longest is what the game is told to do until the next scan. Your own click cancels it. A
   scan costs at most the horizon in ghost ticks (the current action first, the others stop when they beat
   it), backs off when it costs more than the click budget, and is gated to practice / P1 / non-platformer.
+- v2.97.1: the survival pick no longer presses or lets go while you are fine. It only takes over when
+  what you are doing dies inside the 'only step in' window (1 s by default) and another scripted input
+  lives at least 12 ticks longer; otherwise it hands control back to what you are really holding. The
+  action-you-are-doing run now stops just past that window, so a scan is far cheaper too.

@@ -1,4 +1,4 @@
-// Click Before Frames v2.97 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v2.97.1 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -80,6 +80,9 @@ namespace {
     // Never the binding limit in practice: searches end on their own via the time budget,
     // the same-crash rule, or the ghost dying while coasting before a delayed input fires.
     constexpr int MAX_TICKS = 24000;
+    // v2.97.1: a survival pick has to live at least this much longer than what you are doing
+    // (12 ticks = 3 frames at 60 fps), so a scan never presses or lets go over noise.
+    constexpr int SURVIVAL_MARGIN = 12;
 
     // v2.95 (Geode v6 / GD 2.2091): Mod::getSaveDir() returns an asp::fs::Path now. The level
     // memory, run check and console export below stay on std::filesystem, so the save dir is
@@ -256,6 +259,8 @@ namespace {
         bool survivalPick = true;
         int survivalHorizon = 2400;   // ticks each policy may run (2400 = 10 s)
         int survivalStride = 240;     // ticks between scans
+        int survivalWindow = 240;     // only step in when what you're doing dies within this
+        bool survivalPress = true;    // v2.97.1: off = the scan may only let go, never press for you
         int survivalTap = 12;         // ticks per half of the tap rhythm
         survival_policy::Action autoAction = survival_policy::Action::None;
         int autoActionTicks = 0;
@@ -530,6 +535,8 @@ namespace {
         buf.survivalPick = mod->getSettingValue<bool>("survival-pick");
         buf.survivalHorizon = static_cast<int>(mod->getSettingValue<int64_t>("survival-horizon"));
         buf.survivalStride = static_cast<int>(mod->getSettingValue<int64_t>("survival-stride"));
+        buf.survivalWindow = static_cast<int>(mod->getSettingValue<int64_t>("survival-window"));
+        buf.survivalPress = mod->getSettingValue<bool>("survival-press");
         buf.survivalTap = static_cast<int>(mod->getSettingValue<int64_t>("survival-tap"));
         buf.budgetMs = mod->getSettingValue<double>("sim-budget-ms");
         buf.autoBudget = mod->getSettingValue<bool>("auto-budget");
@@ -4151,10 +4158,15 @@ namespace {
         using survival_policy::Action;
         auto* p2 = dual ? layer->m_player2 : nullptr;
         int horizon = std::max(24, buf.survivalHorizon);
-        int budget = horizon;
+        int deadline = std::clamp(buf.survivalWindow, 2, horizon);
         Action current = buf.appliedInput ? Action::Hold : Action::Release;
-        int cur = survivalRun(layer, p1, p2, dual, current, budget);
-        budget -= cur;
+        // Only "do I die soon?" matters for the action you are doing, so that run stops right past
+        // the deadline. The others only run when it did die, and stop as soon as they beat it.
+        int cur = survivalRun(layer, p1, p2, dual, current, deadline + 1);
+        if (cur > deadline) {
+            return survival_policy::choose(current, cur, -1, -1, -1, deadline, 0);
+        }
+        int budget = horizon;
         int hold = current == Action::Hold ? cur : -1;
         int release = current == Action::Release ? cur : -1;
         int tap = -1;
@@ -4164,7 +4176,12 @@ namespace {
             if (a == current || budget <= 0) {
                 continue;
             }
-            int cap = std::min(horizon, std::min(budget, best + 1));
+            // v2.97.1: with "may press for you" off the scan can only ever let go, so it never
+            // presses the button on its own
+            if (!buf.survivalPress && a != Action::Release) {
+                continue;
+            }
+            int cap = std::min(horizon, std::min(budget, best + SURVIVAL_MARGIN + 1));
             if (cap <= 0) {
                 break;
             }
@@ -4181,7 +4198,7 @@ namespace {
             }
             best = std::max(best, t);
         }
-        return survival_policy::choose(current, cur, hold, release, tap, cur >= horizon);
+        return survival_policy::choose(current, cur, hold, release, tap, deadline, SURVIVAL_MARGIN);
     }
 
     // Called once per physics step, before the buffer delivers anything. Your own click always
@@ -4209,11 +4226,21 @@ namespace {
             if (cost > buf.budgetMs) {
                 buf.sinceScan = std::min(buf.sinceScan * 2, std::max(12, buf.survivalStride) * 8);
             }
-            survival_policy::Action next = choice.takeOver ? choice.action : (buf.appliedInput ? survival_policy::Action::Hold : survival_policy::Action::Release);
-            if (next != buf.autoAction) {
-                buf.autoActionTicks = 0;
+            if (choice.takeOver) {
+                if (choice.action != buf.autoAction) {
+                    buf.autoActionTicks = 0;
+                }
+                if (buf.explain || buf.deathLog) {
+                    say("survival: {} -> {} ({}t)", survival_policy::name(buf.autoAction), survival_policy::name(choice.action),
+                        choice.ticks);
+                }
+                buf.autoAction = choice.action;
             }
-            buf.autoAction = next;
+            else {
+                // nothing imminent: the game follows what you're really holding again, so the
+                // button is never pressed for no reason
+                buf.autoAction = survival_policy::Action::None;
+            }
         }
         if (buf.autoAction == survival_policy::Action::None) {
             return;
@@ -4729,7 +4756,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.97 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v2.97.1 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {

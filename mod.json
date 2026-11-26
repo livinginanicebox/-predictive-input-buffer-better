@@ -3,7 +3,7 @@
 	"gd": {
 		"win": "2.2091"
 	},
-	"version": "v2.97.0",
+	"version": "v2.97.1",
 	"id": "basu.input-buffer",
 	"name": "Click Before Frames",
 	"developer": "BASU",
@@ -29,6 +29,20 @@
 			"description": "Ticks between scans. 240 ticks = 1 second at 240 steps per second. Smaller reacts faster and costs more.",
 			"default": 240,
 			"min": 12,
+			"max": 2400
+		},
+		"survival-press": {
+			"type": "bool",
+			"name": "Survival scan: may press for you",
+			"description": "Off = the scan may only let go of the button, never press it, so it never holds on its own. On = it may also hold or tap when that lives longer.",
+			"default": true
+		},
+		"survival-window": {
+			"type": "int",
+			"name": "Survival scan: only step in when you die within (ticks)",
+			"description": "The pick only takes over when what you are doing dies inside this many ticks and another scripted input lives at least 12 ticks longer. 240 ticks = 1 second. Lower = reacts later and presses less.",
+			"default": 240,
+			"min": 2,
 			"max": 2400
 		},
 		"survival-tap": {
