@@ -1,4 +1,5 @@
-// Click Before Frames v2.94 (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
+// Click Before Frames v2.95 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
 // ahead with your input. If the ghost dies, the input is retried with 1..N ticks of
@@ -32,6 +33,7 @@
 #include <Geode/modify/EndLevelLayer.hpp>
 #include <Geode/ui/GeodeUI.hpp>
 #include <Geode/ui/Popup.hpp>
+#include <asp/fs/std.hpp>
 #include <map>
 #include <Geode/modify/PlayerObject.hpp>
 #include <Geode/modify/RingObject.hpp>
@@ -73,6 +75,14 @@ namespace {
     // Never the binding limit in practice: searches end on their own via the time budget,
     // the same-crash rule, or the ghost dying while coasting before a delayed input fires.
     constexpr int MAX_TICKS = 24000;
+
+    // v2.95 (Geode v6 / GD 2.2091): Mod::getSaveDir() returns an asp::fs::Path now. The level
+    // memory, run check and console export below stay on std::filesystem, so the save dir is
+    // converted once. toStdPath() goes through the native (UTF-16 on Windows) form, which keeps
+    // user names outside the ANSI codepage working.
+    std::filesystem::path saveDirPath() {
+        return Mod::get()->getSaveDir().toStdPath().unwrapOrDefault();
+    }
 
     constexpr uint64_t typeBit(GameObjectType type) {
         return 1ull << static_cast<int>(type);
@@ -643,8 +653,8 @@ namespace {
 
         bool copied = geode::utils::clipboard::write(text);
         std::error_code ec;
-        std::filesystem::create_directories(mod->getSaveDir(), ec);
-        std::ofstream(mod->getSaveDir() / "console-export.txt", std::ios::trunc) << text;
+        std::filesystem::create_directories(saveDirPath(), ec);
+        std::ofstream(saveDirPath() / "console-export.txt", std::ios::trunc) << text;
         say("console {} ({} lines) + saved to console-export.txt", copied ? "copied to clipboard" : "NOT copied", exportLines.size());
     }
 
@@ -794,7 +804,7 @@ namespace {
         ghost->m_wasJumpBuffered = real->m_wasJumpBuffered;
         ghost->m_stateJumpBuffered = real->m_stateJumpBuffered;
         ghost->m_stateRingJump = real->m_stateRingJump;
-        ghost->m_stateRingJump2 = real->m_stateRingJump2;
+        ghost->m_statePreJump = real->m_statePreJump;
         ghost->m_wasRobotJump = real->m_wasRobotJump;
         ghost->m_touchedRing = real->m_touchedRing;
         ghost->m_touchedPad = real->m_touchedPad;
@@ -808,9 +818,9 @@ namespace {
         // reverse (going left), sideways, dual. copyAttributes() doesn't carry most of
         // it, the slope state above all (wave and cube riding slopes drifted without it).
         ghost->m_reverseSync = real->m_reverseSync;
-        ghost->m_reverseRelated = real->m_reverseRelated;
+        ghost->m_reverseCooldown = real->m_reverseCooldown;
         ghost->m_maybeReverseSpeed = real->m_maybeReverseSpeed;
-        ghost->m_maybeReverseAcceleration = real->m_maybeReverseAcceleration;
+        ghost->m_reverseSyncStep = real->m_reverseSyncStep;
         ghost->m_speedMultiplier = real->m_speedMultiplier;
         ghost->m_fixRobotJump = real->m_fixRobotJump;
         ghost->m_enable22Changes = real->m_enable22Changes;
@@ -822,35 +832,35 @@ namespace {
         // vertical motion
         ghost->m_yVelocityBeforeSlope = real->m_yVelocityBeforeSlope;
         ghost->m_yVelocityRelated = real->m_yVelocityRelated;
-        ghost->m_yVelocityRelated3 = real->m_yVelocityRelated3;
+        ghost->m_diagonalYStep = real->m_diagonalYStep;
         ghost->m_groundYVelocity = real->m_groundYVelocity;
         ghost->m_accelerationOrSpeed = real->m_accelerationOrSpeed;
         ghost->m_isAccelerating = real->m_isAccelerating;
-        ghost->m_maybeIsFalling = real->m_maybeIsFalling;
-        ghost->m_isOnGround2 = real->m_isOnGround2;
-        ghost->m_isOnGround3 = real->m_isOnGround3;
-        ghost->m_isOnGround4 = real->m_isOnGround4;
+        ghost->m_hasStartedFalling = real->m_hasStartedFalling;
+        ghost->m_touchingGround = real->m_touchingGround;
+        ghost->m_landedSinceFlip = real->m_landedSinceFlip;
+        ghost->m_wasTouchingGround = real->m_wasTouchingGround;
         ghost->m_stateOnGround = real->m_stateOnGround;
         ghost->m_lastLandTime = real->m_lastLandTime;
         ghost->m_lastJumpTime = real->m_lastJumpTime;
         ghost->m_lastFlipTime = real->m_lastFlipTime;
         ghost->m_lastSpiderFlipTime = real->m_lastSpiderFlipTime;
         ghost->m_lastGroundedPos = real->m_lastGroundedPos;
-        ghost->m_blackOrbRelated = real->m_blackOrbRelated;
-        ghost->m_padRingRelated = real->m_padRingRelated;
-        ghost->m_ringJumpRelated = real->m_ringJumpRelated;
+        ghost->m_lastSlopeSnapOffset = real->m_lastSlopeSnapOffset;
+        ghost->m_ringJumpedSincePress = real->m_ringJumpedSincePress;
+        ghost->m_usedRingThisStep = real->m_usedRingThisStep;
 
         // slopes
         ghost->m_isOnSlope = real->m_isOnSlope;
         ghost->m_wasOnSlope = real->m_wasOnSlope;
         ghost->m_slopeVelocity = real->m_slopeVelocity;
-        ghost->m_maybeUpsideDownSlope = real->m_maybeUpsideDownSlope;
+        ghost->m_slopeResnapped = real->m_slopeResnapped;
         ghost->m_currentSlope = real->m_currentSlope;
         ghost->m_currentSlope2 = real->m_currentSlope2;
         ghost->m_currentPotentialSlope = real->m_currentPotentialSlope;
         ghost->m_isCollidingWithSlope = real->m_isCollidingWithSlope;
         ghost->m_collidingWithSlopeId = real->m_collidingWithSlopeId;
-        ghost->m_slopeFlipGravityRelated = real->m_slopeFlipGravityRelated;
+        ghost->m_slopeIsDownhill = real->m_slopeIsDownhill;
         ghost->m_slopeAngle = real->m_slopeAngle;
         ghost->m_slopeAngleRadians = real->m_slopeAngleRadians;
         ghost->m_slopeRotation = real->m_slopeRotation;
@@ -891,12 +901,14 @@ namespace {
         ghost->m_affectedByForces = real->m_affectedByForces;
         ghost->m_stateBoostX = real->m_stateBoostX;
         ghost->m_stateBoostY = real->m_stateBoostY;
-        ghost->m_stateNoStickX = real->m_stateNoStickX;
-        ghost->m_stateNoStickY = real->m_stateNoStickY;
+        // GD 2.2091 removed the player's per-step "no stick" bytes (that part of the state is
+        // one unused float now), so there is nothing left to copy for them. 2.2091's new
+        // between-steps collision flag is copied instead.
+        ghost->m_collidingBetweenSteps = real->m_collidingBetweenSteps;
         ghost->m_stateHitHead = real->m_stateHitHead;
         ghost->m_stateNoAutoJump = real->m_stateNoAutoJump;
         ghost->m_stateScale = real->m_stateScale;
-        ghost->m_maybeStateForce2 = real->m_maybeStateForce2;
+        ghost->m_stateNoWallPush = real->m_stateNoWallPush;
     }
 
     // Your recent input timings, so predictions model what you actually do instead of
@@ -1208,7 +1220,7 @@ namespace {
     std::filesystem::path memoryFile() {
         // v2.37: slices keyed by the real position. v2.75: _v3, a fresh start after the
         // prediction fixes of v2.61-v2.74 (old files learned from the buggy versions)
-        return Mod::get()->getSaveDir() / "memory" / (memoryKey + "_v3.txt");
+        return saveDirPath() / "memory" / (memoryKey + "_v3.txt");
     }
 
     size_t memorySpots() {
@@ -2758,7 +2770,7 @@ namespace {
     std::string lastBench;        // last result, for the stats popup
 
     std::filesystem::path benchFile() {
-        return Mod::get()->getSaveDir() / "bench" / (memoryKey + ".txt");
+        return saveDirPath() / "bench" / (memoryKey + ".txt");
     }
 
     size_t benchSavedTicks() {
@@ -2924,8 +2936,8 @@ namespace {
         say("run check: {} | max error {:.1f}u{} | {:.0f} ms", lastBench, maxErr,
             std::abs(r.dt - buf.tickLength) > 1e-4f ? " | recorded at another frame rate" : "", ms);
         std::error_code ec;
-        std::filesystem::create_directories(Mod::get()->getSaveDir(), ec);
-        std::ofstream(Mod::get()->getSaveDir() / "run-check-results.txt", std::ios::app)
+        std::filesystem::create_directories(saveDirPath(), ec);
+        std::ofstream(saveDirPath() / "run-check-results.txt", std::ios::app)
             << Mod::get()->getVersion().toVString() << ' ' << memoryKey << ": " << lastBench << '\n';
     }
 
@@ -4511,7 +4523,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.85 loaded. F3 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v2.95 loaded (GD 2.2091). F3 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4563,8 +4575,9 @@ class $modify(BufPlayLayer, PlayLayer) {
         finishDrift(" (died)");
     }
 
-    bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
-        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) {
+    // v2.95: GD 2.209 removed the replay path from PlayLayer, so init() is (level, dontCreateObjects).
+    bool init(GJGameLevel* level, bool dontCreateObjects) {
+        if (!PlayLayer::init(level, dontCreateObjects)) {
             return false;
         }
         dropGhosts();
@@ -4767,7 +4780,7 @@ class $modify(BufEffectGameObject, EffectGameObject) {
         (void)self.setHookPriority("EffectGameObject::triggerObject", HOOK_PRIORITY);
     }
 
-    void triggerObject(GJBaseGameLayer* layer, int uniqueID, gd::vector<int> const* remapKeys) {
+    void triggerObject(GJBaseGameLayer* layer, int uniqueID, std::vector<int> const* remapKeys) {
         if (buf.simulating) {
             return;
         }
@@ -5102,12 +5115,12 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
         return GJBaseGameLayer::canBeActivatedByPlayer(player, object);
     }
 
-    void collisionCheckObjects(PlayerObject* player, gd::vector<GameObject*>* objects, int objectCount, float dt) {
+    void collisionCheckObjects(PlayerObject* player, std::vector<GameObject*>* objects, int objectCount, float dt) {
         if (!buf.simulating) {
             GJBaseGameLayer::collisionCheckObjects(player, objects, objectCount, dt);
             return;
         }
-        static gd::vector<GameObject*> relevant;
+        static std::vector<GameObject*> relevant;
         relevant.clear();
         if (static_cast<int>(relevant.capacity()) < objectCount) {
             relevant.reserve(objectCount);
@@ -5285,7 +5298,7 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
     // Toggle orbs, orbs / pads / collectibles with groups, item and counter triggers could
     // otherwise toggle or spawn groups and change item counters for real (once per
     // prediction run, many times a click), which broke triggers in some levels.
-    void toggleGroupTriggered(int group, bool activate, gd::vector<int> const& remapKeys, int triggerID, int controlID) {
+    void toggleGroupTriggered(int group, bool activate, std::vector<int> const& remapKeys, int triggerID, int controlID) {
         if (buf.simulating) {
             // v2.75: a toggle orb that switches a group off: the ghost stops colliding with
             // that group for the rest of this prediction (the real objects aren't touched)
@@ -5301,7 +5314,7 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
         GJBaseGameLayer::toggleGroupTriggered(group, activate, remapKeys, triggerID, controlID);
     }
 
-    void spawnGroup(int group, bool ordered, double delay, gd::vector<int> const& remapKeys, int triggerID, int controlID) {
+    void spawnGroup(int group, bool ordered, double delay, std::vector<int> const& remapKeys, int triggerID, int controlID) {
         if (buf.simulating) {
             return;
         }
@@ -5336,7 +5349,7 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
         GJBaseGameLayer::activateItemEditTrigger(object);
     }
 
-    void activateItemCompareTrigger(ItemTriggerGameObject* object, gd::vector<int> const& remapKeys) {
+    void activateItemCompareTrigger(ItemTriggerGameObject* object, std::vector<int> const& remapKeys) {
         if (buf.simulating) {
             return;
         }
