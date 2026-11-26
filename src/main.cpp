@@ -1,4 +1,4 @@
-// Click Before Frames v2.96.3 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v2.97 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -22,6 +22,7 @@
 #include "wave_rescue_policy.hpp"
 #include "menu_shortcut.hpp"
 #include "bypass_policy.hpp"
+#include "survival_policy.hpp"
 #include <Geode/Geode.hpp>
 #include <Geode/modify/CCCircleWave.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
@@ -251,6 +252,16 @@ namespace {
         // over to the first physics step of the next body (in practice mode a checkpoint respawn
         // never calls PlayLayer::init, so the old state used to survive it).
         bool attemptReset = false;        // the next live step has to start the body with nothing held
+        // v2.97 survival scan: hold / release / tap, whichever lives longest
+        bool survivalPick = true;
+        int survivalHorizon = 2400;   // ticks each policy may run (2400 = 10 s)
+        int survivalStride = 240;     // ticks between scans
+        int survivalTap = 12;         // ticks per half of the tap rhythm
+        survival_policy::Action autoAction = survival_policy::Action::None;
+        int autoActionTicks = 0;
+        int sinceScan = 0;
+        int simTapEvery = 0;          // tap rhythm handed to simulate() for the current run
+        bool simPureSurvival = false; // simulate() runs to the death / the cap, never "landed = safe"
         bool auto1 = false, auto2 = false;   // an orb auto-click is currently held on this ghost
         bool orbTiming = true;       // v2.26: orb clicks at specific timings inside the orb
         int orbClickDelay = 0;       // v2.26: ghost orb auto-clicks wait this many ticks into the orb
@@ -515,6 +526,11 @@ namespace {
     void readSettings() {
         auto* mod = Mod::get();
         buf.smart = mod->getSettingValue<bool>("smart-prediction");
+        // v2.97 survival scan
+        buf.survivalPick = mod->getSettingValue<bool>("survival-pick");
+        buf.survivalHorizon = static_cast<int>(mod->getSettingValue<int64_t>("survival-horizon"));
+        buf.survivalStride = static_cast<int>(mod->getSettingValue<int64_t>("survival-stride"));
+        buf.survivalTap = static_cast<int>(mod->getSettingValue<int64_t>("survival-tap"));
         buf.budgetMs = mod->getSettingValue<double>("sim-budget-ms");
         buf.autoBudget = mod->getSettingValue<bool>("auto-budget");
         // v2.75 rebindable keys
@@ -1696,6 +1712,17 @@ namespace {
                     pressGhost(buf.ghost2, down);
                 }
             }
+            // v2.97 survival scan: the tap policy holds for `simTapEvery` ticks, lets go for the
+            // same and repeats, instead of one press.
+            if (buf.simTapEvery > 0 && tick >= delay) {
+                bool want = survival_policy::wantsDown(survival_policy::Action::Tap, tick - delay, std::max(2, buf.simTapEvery));
+                if (want != buf.held1) {
+                    pressGhost(buf.ghost1, want);
+                    if (second) {
+                        pressGhost(buf.ghost2, want);
+                    }
+                }
+            }
             if (buf.retapAt >= 0) {
                 // v2.15: a second tap (let go, press, let go): "flip back" for the spider
                 int t = tick - delay - buf.retapAt;
@@ -1774,7 +1801,8 @@ namespace {
                 buf.recordPath->push_back(buf.ghost1->getPosition());
             }
             if (buf.ghostHitPortal) {
-                safe = wave_rescue_policy::portalIsSafe(buf.rejectPortalSafety, tick, delay);
+                // a survival run stops at a portal it can't simulate instead of calling it safe
+                safe = !buf.simPureSurvival && wave_rescue_policy::portalIsSafe(buf.rejectPortalSafety, tick, delay);
                 break;
             }
 
@@ -1806,7 +1834,8 @@ namespace {
             // into obstacles that need your next click. Now: standing on a surface for
             // SPIDER_LAND ticks after the input = the flip is done and safe.
             if (spiderRun) {
-                if (++groundTicks >= st(SPIDER_LAND)) {
+                ++groundTicks;
+                if (!buf.simPureSurvival && groundTicks >= st(SPIDER_LAND)) {
                     safe = true;
                     break;
                 }
@@ -1823,7 +1852,7 @@ namespace {
                 if (landedAt < 0) {
                     landedAt = tick;
                 }
-                if (tick - landedAt >= st(LOOKAHEAD_TAIL)) {
+                if (!buf.simPureSurvival && tick - landedAt >= st(LOOKAHEAD_TAIL)) {
                     safe = true;
                     break;
                 }
@@ -3389,6 +3418,9 @@ namespace {
         bool dual = !twoPlayer && layer->m_gameState.m_isDualMode && layer->m_player2;
 
         buf.isPlayer1 = isPlayer1;
+        // v2.97: your own click always wins over the survival scan
+        buf.autoAction = survival_policy::Action::None;
+        buf.sinceScan = std::max(12, buf.survivalStride);
         buf.realInput = down;
         buf.shipStraight = false;
         if (buf.autoReleased) {
@@ -4093,6 +4125,106 @@ namespace {
         refreshPanel();
     }
 
+    // v2.97 survival scan ---------------------------------------------------------------
+    // Three scripted things you can do with the button from right now: keep holding, stay
+    // released, or tap (hold `survival-tap` ticks, let go the same, repeat). Each is run on the
+    // ghost with no early "landed, so it's safe" exit, so the numbers are real survival ticks,
+    // and the one that lives longest is what the game is told to do.
+    bool survivalDriving() {
+        return buf.autoAction != survival_policy::Action::None;
+    }
+
+    int survivalRun(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, survival_policy::Action action, int cap) {
+        buf.simTapEvery = action == survival_policy::Action::Tap ? std::max(2, buf.survivalTap) : 0;
+        buf.simPureSurvival = true;
+        SimEnd end = SimEnd::Ok;
+        bool down = survival_policy::wantsDown(action, 0, std::max(2, buf.survivalTap));
+        int survived = simulate(layer, p1, p2, dual, 0, down, cap, -1, cap, &end);
+        buf.simTapEvery = 0;
+        buf.simPureSurvival = false;
+        return std::min(survived, cap);
+    }
+
+    // The scan costs at most `survival-horizon` ghost ticks: the action the game is already doing
+    // runs first, and every other one stops as soon as it has beaten it.
+    survival_policy::Choice survivalScan(PlayLayer* layer, PlayerObject* p1, bool dual) {
+        using survival_policy::Action;
+        auto* p2 = dual ? layer->m_player2 : nullptr;
+        int horizon = std::max(24, buf.survivalHorizon);
+        int budget = horizon;
+        Action current = buf.appliedInput ? Action::Hold : Action::Release;
+        int cur = survivalRun(layer, p1, p2, dual, current, budget);
+        budget -= cur;
+        int hold = current == Action::Hold ? cur : -1;
+        int release = current == Action::Release ? cur : -1;
+        int tap = -1;
+        int best = cur;
+        Action order[] = { Action::Hold, Action::Release, Action::Tap };
+        for (Action a : order) {
+            if (a == current || budget <= 0) {
+                continue;
+            }
+            int cap = std::min(horizon, std::min(budget, best + 1));
+            if (cap <= 0) {
+                break;
+            }
+            int t = survivalRun(layer, p1, p2, dual, a, cap);
+            budget -= t;
+            if (a == Action::Hold) {
+                hold = t;
+            }
+            else if (a == Action::Release) {
+                release = t;
+            }
+            else {
+                tap = t;
+            }
+            best = std::max(best, t);
+        }
+        return survival_policy::choose(current, cur, hold, release, tap, cur >= horizon);
+    }
+
+    // Called once per physics step, before the buffer delivers anything. Your own click always
+    // wins: it cancels the pick (see intercept()) and goes through the normal prediction path.
+    void survivalStep(PlayLayer* layer, PlayerObject* p1) {
+        if (!buf.survivalPick || !buf.enabled || buf.simulating || buf.train || !buf.isPlayer1) {
+            return;
+        }
+        if (buf.practiceOnly && !layer->m_isPracticeMode) {
+            return;
+        }
+        if (layer->m_isPlatformer || (layer->m_level && layer->m_level->m_twoPlayerMode)) {
+            return;
+        }
+        if (!buf.queue.empty() || buf.autoReleased || p1->m_isDead) {
+            return;
+        }
+        bool dual = layer->m_gameState.m_isDualMode && layer->m_player2;
+        if (--buf.sinceScan <= 0) {
+            buf.sinceScan = std::max(12, buf.survivalStride);
+            auto start = std::chrono::steady_clock::now();
+            auto choice = survivalScan(layer, p1, dual);
+            // a scan that costs more than a click's budget is done less often from now on
+            auto cost = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            if (cost > buf.budgetMs) {
+                buf.sinceScan = std::min(buf.sinceScan * 2, std::max(12, buf.survivalStride) * 8);
+            }
+            survival_policy::Action next = choice.takeOver ? choice.action : (buf.appliedInput ? survival_policy::Action::Hold : survival_policy::Action::Release);
+            if (next != buf.autoAction) {
+                buf.autoActionTicks = 0;
+            }
+            buf.autoAction = next;
+        }
+        if (buf.autoAction == survival_policy::Action::None) {
+            return;
+        }
+        bool want = survival_policy::wantsDown(buf.autoAction, buf.autoActionTicks, std::max(1, buf.survivalTap));
+        ++buf.autoActionTicks;
+        if (want != buf.appliedInput) {
+            sendButton(layer, want);
+        }
+    }
+
     // v2.4 wave auto-release (practice mode only): while you hold in wave, check every
     // tick whether holding crashes within the next `autoWindow` ticks. If it does and
     // letting go now clearly survives longer, let go for you. Your own release later is
@@ -4164,7 +4296,7 @@ namespace {
         if (!buf.shipBuffer && (player->m_isShip || (dual && layer->m_player2->m_isShip))) {
             resetPending();
             buf.autoReleased = false;
-            if (buf.appliedInput != buf.realInput) {
+            if (buf.appliedInput != buf.realInput && !survivalDriving()) {
                 sendButton(layer, buf.realInput);
             }
             return;
@@ -4176,10 +4308,12 @@ namespace {
         }
 
         if (buf.queue.empty()) {
-            if (buf.appliedInput != buf.realInput && !buf.autoReleased) {
+            if (buf.appliedInput != buf.realInput && !buf.autoReleased && !survivalDriving()) {
                 sendButton(layer, buf.realInput);
             }
-            tryAutoRelease(layer, player);
+            if (!survivalDriving()) {
+                tryAutoRelease(layer, player);
+            }
             sweepGhostLayer();
             return;
         }
@@ -4595,7 +4729,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.96.3 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v2.97 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4642,6 +4776,8 @@ class $modify(BufPlayLayer, PlayLayer) {
         // button by itself on the next body. Both are cleared now: the game is told the button is
         // up on the next live step, and nothing is considered held.
         buf.attemptReset = true;
+        buf.autoAction = survival_policy::Action::None;
+        buf.sinceScan = 0;
         buf.realInput = false;
         buf.appliedInput = false;
         buf.autoReleased = false;
@@ -4954,6 +5090,8 @@ class $modify(BufPlayerObject, PlayerObject) {
             if (buf.attemptReset && !this->m_isDead) {
                 buf.attemptReset = false;
                 resetPending();
+                buf.autoAction = survival_policy::Action::None;
+                buf.sinceScan = 0;
                 buf.realInput = false;
                 buf.appliedInput = false;
                 buf.held1 = buf.held2 = false;
@@ -4985,6 +5123,8 @@ class $modify(BufPlayerObject, PlayerObject) {
             driftStep(this);
             memoryTick();
             if (buf.enabled) {
+                // v2.97: hold / release / tap - whichever of them lives longest from here
+                survivalStep(layer, this);
                 deliverPending(layer, this);
                 livePath(layer, this);
             }

@@ -3,12 +3,42 @@
 	"gd": {
 		"win": "2.2091"
 	},
-	"version": "v2.96.3",
+	"version": "v2.97.0",
 	"id": "basu.input-buffer",
 	"name": "Click Before Frames",
 	"developer": "BASU",
 	"description": "Trajectory-based input buffer: delays early clicks/releases by any number of frames (no cap, same max delay in every gamemode), with orb, pad and portal-aware prediction. github.com/raresdalas1009/-predictive-input-buffer",
 	"settings": {
+		"survival-pick": {
+			"type": "bool",
+			"name": "Auto survival: keep holding / let go / tap",
+			"description": "While you play, the mod looks ahead under three scripted inputs - holding the button, letting go, and tapping on the 'Survival tap' rhythm - and does whichever one lives longest. Your own clicks always win and go through the normal buffer. Practice mode only, unless 'Practice mode only' is off. Costs a prediction per scan; lower the horizon or raise the stride if it hitches.",
+			"default": true
+		},
+		"survival-horizon": {
+			"type": "int",
+			"name": "Survival scan: how far ahead (ticks)",
+			"description": "How long each of the three scripted inputs is run. 2400 ticks = 10 seconds. A scan never costs more than this many ghost ticks.",
+			"default": 2400,
+			"min": 24,
+			"max": 24000
+		},
+		"survival-stride": {
+			"type": "int",
+			"name": "Survival scan: how often (ticks)",
+			"description": "Ticks between scans. 240 ticks = 1 second at 240 steps per second. Smaller reacts faster and costs more.",
+			"default": 240,
+			"min": 12,
+			"max": 2400
+		},
+		"survival-tap": {
+			"type": "int",
+			"name": "Survival tap: ticks per press and release",
+			"description": "The tap policy holds the button this many ticks, lets go for the same, and repeats. 12 ticks = 0.05 s at 60 fps.",
+			"default": 12,
+			"min": 2,
+			"max": 240
+		},
 		"custom-ticks": {
 			"type": "int",
 			"name": "Custom stage: max delay (ticks)",
