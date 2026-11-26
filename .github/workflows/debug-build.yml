@@ -59,18 +59,8 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SDK_OUTCOME: ${{ steps.sdk.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
         run: |
-          {
-            echo "sdk=${{ steps.sdk.outcome }} build=${{ steps.build.outcome }}"
-            echo '--- errors ---'
-            grep -nE "error:|Error:|fatal error|CMake Error" configure.log build.log 2>/dev/null | head -n 60
-            echo '--- build tail ---'
-            tail -n 25 build.log 2>/dev/null
-            echo '--- configure tail ---'
-            tail -n 15 configure.log 2>/dev/null
-          } > relay.txt
-          python3 -c "
-import json,os
-body=open('relay.txt',encoding='utf-8',errors='replace').read()[:60000]
-print(json.dumps({'body':body,'commit_id':os.environ['GITHUB_SHA']}))" > payload.json
+          python3 scripts/relay_log.py
           gh api "repos/${{ github.repository }}/comments" --method POST --input payload.json || echo "relay post failed"
