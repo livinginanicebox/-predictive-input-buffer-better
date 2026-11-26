@@ -1,0 +1,6 @@
+sdk=failure build=failure
+--- errors ---
+configure.log:59: CMake Error at geode-sdk-clone/CMakeLists.txt:435 (message):
+configure.log:64: -- Configuring incomplete, errors occurred!
+--- build tail ---
+(no build.log)

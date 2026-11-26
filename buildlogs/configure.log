@@ -1,0 +1,64 @@
+-- The C compiler identification is Clang 23.1.3 with GNU-like command-line
+-- The CXX compiler identification is Clang 23.1.3 with GNU-like command-line
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: C:/Program Files/LLVM/bin/clang.exe - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Program Files/LLVM/bin/clang++.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Version: 6.0.0
+-- No override path for bindings provided, using CPM to clone default. If you would like to use a separate clone of the bindings repo (for example in order to be able to efficiently change and contribute new bindings) then set GEODE_BINDINGS_REPO_PATH to where you have cloned the repository (system environment variables are supported).
+-- CPM: Adding package bindings@ (main)
+-- Populating bindings
+-- Configuring done (0.1s)
+-- Generating done (0.0s)
+-- Build files have been written to: D:/a/-predictive-input-buffer-better/-predictive-input-buffer-better/build/_deps/bindings-subbuild
+[1/9] Creating directories for 'bindings-populate'
+[1/9] Performing download step (git clone) for 'bindings-populate'
+Cloning into 'bindings-src'...
+Already on 'main'
+Your branch is up to date with 'origin/main'.
+[2/9] Performing update step for 'bindings-populate'
+-- Fetching latest from the remote origin
+[3/9] No patch step for 'bindings-populate'
+[5/9] No configure step for 'bindings-populate'
+[6/9] No build step for 'bindings-populate'
+[7/9] No install step for 'bindings-populate'
+[8/9] No test step for 'bindings-populate'
+[9/9] Completed 'bindings-populate'
+-- Looking for ccache/sccache
+-- Looking for ccache/sccache - found ccache (C:/Strawberry/c/bin/ccache.exe)
+Compiler launcher not set but ccache/sccache was found. Setting compiler launcher to that
+Using ccache with Clang, PCH will be disabled.
+-- Pre-compiled headers - OFF
+-- Found Geode CLI: D:/a/-predictive-input-buffer-better/-predictive-input-buffer-better/my-epic-geode-cli/geode.exe (version 4.0.2)
+-- CPM: Adding package result@1668 (1668d22)
+-- CPM: Adding package json@4.1.0 (v4.1.0)
+-- CPM: Adding package nontype_functional@6 (6d1d08c)
+-- CPM: Adding package fmt@12.2.0 (12.2.0)
+-- {fmt} version: 12.2.0
+-- Build type: Release
+-- Performing Test HAS_NULLPTR_WARNING
+-- Performing Test HAS_NULLPTR_WARNING - Success
+-- CPM: Adding package asp2@1.6.4 (v1.6.4)
+-- CPM: Adding package arc@1.6.6 (v1.6.6)
+-- Arc features: time
+-- CPM: Adding package TulipHook@50 (50e729f)
+-- Performing Test SUPPORTS_W_NO_EVERYTHING
+-- Performing Test SUPPORTS_W_NO_EVERYTHING - Success
+-- Downloading Codegen
+Set SKIP_BUILDING_CODEGEN to OFF to force codegen to build locally.
+-- Downloading Codegen - success
+-- Skipping building Codegen
+-- Running Codegen
+'D:/a/-predictive-input-buffer-better/-predictive-input-buffer-better/build/bindings/codegen/Codegen.exe' 'Win64' 'D:/a/-predictive-input-buffer-better/-predictive-input-buffer-better/build/_deps/bindings-src/bindings/2.2091' 'D:/a/-predictive-input-buffer-better/-predictive-input-buffer-better/build/bindings/bindings'
+CMake Error at geode-sdk-clone/CMakeLists.txt:435 (message):
+  No valid loader binary to link to! Install pre-built binaries with `geode
+  sdk install-binaries`, or build Geode from source.
+
+
+-- Configuring incomplete, errors occurred!
