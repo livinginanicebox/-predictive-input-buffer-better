@@ -1,4 +1,4 @@
-// Click Before Frames v2.96 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v2.96.1 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -4591,7 +4591,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.96 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v2.96.1 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4635,6 +4635,11 @@ class $modify(BufPlayLayer, PlayLayer) {
         buf.appliedInput = false;
         buf.autoReleased = false;
         buf.rapid = 0;
+        // v2.96.1: a held bypass never outlives the attempt. Holding Tab through a death used
+        // to leave the next attempt with the buffer switched off; the new attempt now always
+        // starts on the stage it says it is on, and Tab has to be pressed again.
+        buf.bypass.reset();
+        applyStage();
         forgetPress();
         memoryDeath();
         benchFinish();
@@ -4649,10 +4654,9 @@ class $modify(BufPlayLayer, PlayLayer) {
             return false;
         }
         dropGhosts();
-        // v2.96: a key held across a restart / level change never sends a new press event, so
-        // the state is taken from the key itself: still held -> still bypassed.
+        // v2.96.1: every attempt starts with the buffer as the stage says - a Tab that was
+        // being held on the last attempt is not carried over (it has to be pressed again).
         buf.bypass.reset();
-        buf.bypass.held = bypassKeyDown();
         readSettings();
         applyStage();
         exportLines.clear();
@@ -4778,6 +4782,7 @@ class $modify(BufPlayLayer, PlayLayer) {
 
         buf.realInput = false;
         buf.appliedInput = false;
+        buf.held1 = buf.held2 = false;
         buf.isPlayer1 = true;
         buf.sinceInput = 999;
         buf.rapid = 0;

@@ -7,10 +7,10 @@ The buffer menu opens with four quick F3 taps while in a level (it used to be on
 
 Practice use only; do not use for verified or leaderboard runs. Auto-input features can act without an on-screen watermark.
 
-## Geometry Dash 2.2091 (Geode v6, v2.96)
+## Geometry Dash 2.2091 (Geode v6, v2.96.1)
 This build targets **Geometry Dash 2.2091** with **Geode 6.0.0 or newer**; it no longer loads on 2.2081. The 2.2091 port is a compatibility update, not a change of prediction rules - all v2.94 behaviour is the same.
 
-A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v2.96.0, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
+A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v2.96.1, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
 
 - 2.209 removed the replay path: `PlayLayer::init` is `(GJGameLevel*, bool dontCreateObjects)` now, so the level hook follows that signature.
 - Geode v6 dropped the `gd::` namespace (`gd::vector` is `std::vector`), and `Mod::getSaveDir()` returns an `asp::fs::Path`. Saved level memory, run-check recordings and `console-export.txt` still live in the same folder; the path is converted through its native form so Windows user names outside the ANSI codepage keep working.
@@ -112,3 +112,6 @@ The ghost copies the player's gravity and direction for both upright and upside-
   letting go brings the same stage and settings straight back. Nothing is drawn, logged or announced
   about it - it is silent on purpose. The menu goes back to four quick F3 taps (a tap later than 400 ms
   starts the count over), so one stray F3 can no longer pause the level and open a popup.
+- v2.96.1: the Tab bypass never outlives an attempt. Dying (or restarting) while Tab is held used to start
+  the next attempt with the buffer still switched off; every attempt now starts on the stage it says it
+  is on, and Tab has to be pressed again. A held ghost button is cleared with the attempt too.
