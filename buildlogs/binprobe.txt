@@ -1,0 +1,2 @@
+GEODE_SDK=D:\a\-predictive-input-buffer-better\-predictive-input-buffer-better/geode-sdk-clone
+D:\a\-predictive-input-buffer-better\-predictive-input-buffer-better/geode-sdk-clone/bin:
