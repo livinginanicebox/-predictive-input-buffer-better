@@ -10,6 +10,8 @@ Practice use only; do not use for verified or leaderboard runs. Auto-input featu
 ## Geometry Dash 2.2091 (Geode v6, v2.95)
 This build targets **Geometry Dash 2.2091** with **Geode 6.0.0 or newer**; it no longer loads on 2.2081. The 2.2091 port is a compatibility update, not a change of prediction rules - all v2.94 behaviour is the same.
 
+A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v2.95.0, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
+
 - 2.209 removed the replay path: `PlayLayer::init` is `(GJGameLevel*, bool dontCreateObjects)` now, so the level hook follows that signature.
 - Geode v6 dropped the `gd::` namespace (`gd::vector` is `std::vector`), and `Mod::getSaveDir()` returns an `asp::fs::Path`. Saved level memory, run-check recordings and `console-export.txt` still live in the same folder; the path is converted through its native form so Windows user names outside the ANSI codepage keep working.
 - 2.2091 renamed a lot of `PlayerObject` state (`m_isOnGround2` is `m_touchingGround`, `m_maybeIsFalling` is `m_hasStartedFalling`, `m_yVelocityRelated3` is `m_diagonalYStep`, and so on). The full ghost state copy uses the new names, drops the per-step "no stick" bytes 2.2091 merged into one unused float, and copies the new between-steps collision flag instead.
