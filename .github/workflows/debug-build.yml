@@ -1,0 +1,80 @@
+name: Debug build (log relay)
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/debug-build.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  debug:
+    name: Build and relay errors
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja + LLVM
+        shell: bash
+        run: |
+          choco upgrade llvm -y --no-progress >/dev/null 2>&1 || true
+          curl -L https://github.com/ninja-build/ninja/releases/latest/download/ninja-win.zip -o ninja.zip
+          7z x ninja.zip -o"$GITHUB_WORKSPACE/ninja" >/dev/null
+          echo "$GITHUB_WORKSPACE/ninja" >> $GITHUB_PATH
+      - name: Setup CLI
+        uses: geode-sdk/cli/.github/actions/setup@main
+        with:
+          version: latest
+      - name: Setup Geode SDK
+        shell: bash
+        run: |
+          export CLI_PROFILE="$GITHUB_WORKSPACE/cli-profile"
+          mkdir -p "$CLI_PROFILE/geode/mods"
+          geode profile add --name GithubActions "$CLI_PROFILE/GeometryDash.exe" win
+          geode sdk install "$GITHUB_WORKSPACE/geode-sdk-clone"
+          echo "GEODE_SDK=$GITHUB_WORKSPACE/geode-sdk-clone" >> $GITHUB_ENV
+          TARGET_GEODE_VERSION=$(jq -r '.geode' mod.json)
+          echo "using geode $TARGET_GEODE_VERSION"
+          geode sdk update "$TARGET_GEODE_VERSION"
+          geode sdk install-binaries --platform win --version "$TARGET_GEODE_VERSION"
+          echo "CPM_SOURCE_CACHE=$GITHUB_WORKSPACE/cpm-cache" >> $GITHUB_ENV
+      - name: Configure and build
+        id: build
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
+            -DGEODE_CODEGEN_CMAKE_ARGS="-DCMAKE_C_COMPILER=clang;-DCMAKE_CXX_COMPILER=clang++;-G Ninja" \
+            -G Ninja -DGEODE_DONT_INSTALL_MODS=ON -DGEODE_TARGET_PLATFORM=Win64 2>&1 | tee configure.log
+          cmake --build build --config Release --parallel 2>&1 | tee build.log
+      - name: Relay the log
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo '### Debug build log relay'
+            echo '```'
+            grep -nE "error|Error|ERROR|fatal" build.log configure.log 2>/dev/null | head -n 80
+            echo '```'
+          } > body.md
+          if [ ! -s build.log ]; then echo "NO BUILD LOG" >> body.md; fi
+          python3 - "$(cat body.md)" <<'PY' > payload.json
+          import json,sys
+          print(json.dumps({"body": sys.argv[1] or "empty"}))
+          PY
+          gh api "repos/${{ github.repository }}/comments" --method POST --input payload.json || true
+      - name: Relay tail when there is no 'error' line
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - "$(tail -n 60 build.log 2>/dev/null || echo 'no build.log')" <<'PY' > payload2.json
+          import json,sys
+          print(json.dumps({"body": "### build.log tail\n```\n"+ (sys.argv[1][-6000:] if len(sys.argv)>1 else "") +"\n```"}))
+          PY
+          gh api "repos/${{ github.repository }}/comments" --method POST --input payload2.json || true
