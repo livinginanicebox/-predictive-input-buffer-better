@@ -1,4 +1,4 @@
-// Click Before Frames v2.96.1 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v2.96.2 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -247,6 +247,11 @@ namespace {
         int flyerHorizon = 80;       // v2.81: ship / UFO / swing look-ahead (was fixed at 48t = 12f)
         bool assumeOrbs = true;      // v2.2: the ghost clicks every orb it touches ("calculation mode")
         bool held1 = false, held2 = false;   // button state the ghosts are meant to be in
+        // v2.96.2: a death leaves nothing held. These carry the "start the new body clean" work
+        // over to the first physics step of the next body (in practice mode a checkpoint respawn
+        // never calls PlayLayer::init, so the old state used to survive it).
+        bool attemptReset = false;        // the next live step has to clear the input bookkeeping
+        bool needRespawnRelease = false;  // the game may still be holding a press we lost the release for
         bool auto1 = false, auto2 = false;   // an orb auto-click is currently held on this ghost
         bool orbTiming = true;       // v2.26: orb clicks at specific timings inside the orb
         int orbClickDelay = 0;       // v2.26: ghost orb auto-clicks wait this many ticks into the orb
@@ -4591,7 +4596,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.96.1 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v2.96.2 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4632,9 +4637,19 @@ class $modify(BufPlayLayer, PlayLayer) {
             return;
         }
         resetPending();
+        // v2.96.2: dying while holding a click used to leave a button down. A press the buffer had
+        // already delivered stays down in the game when the release that was queued behind it is
+        // dropped here, and `realInput` used to keep saying "still holding", which re-pressed the
+        // button by itself on the next body. Both are cleared now: the game is told the button is
+        // up on the next live step, and nothing is considered held.
+        buf.needRespawnRelease = buf.appliedInput;
+        buf.attemptReset = true;
+        buf.realInput = false;
         buf.appliedInput = false;
         buf.autoReleased = false;
+        buf.autoDash = false;
         buf.rapid = 0;
+        buf.sinceInput = 999;
         // v2.96.1: a held bypass never outlives the attempt. Holding Tab through a death used
         // to leave the next attempt with the buffer switched off; the new attempt now always
         // starts on the stage it says it is on, and Tab has to be pressed again.
@@ -4657,6 +4672,12 @@ class $modify(BufPlayLayer, PlayLayer) {
         // v2.96.1: every attempt starts with the buffer as the stage says - a Tab that was
         // being held on the last attempt is not carried over (it has to be pressed again).
         buf.bypass.reset();
+        // v2.96.2: brand new player objects, nothing of the last attempt is still held
+        buf.attemptReset = false;
+        buf.needRespawnRelease = false;
+        buf.realInput = false;
+        buf.appliedInput = false;
+        buf.held1 = buf.held2 = false;
         readSettings();
         applyStage();
         exportLines.clear();
@@ -4929,6 +4950,25 @@ class $modify(BufPlayerObject, PlayerObject) {
             // v2.96: the bypass key is read from the OS every step, so a key-up lost while
             // the game was out of focus still brings the buffer straight back.
             pollBypass();
+            // v2.96.2: first live step of the body that replaced a dead one (a checkpoint respawn
+            // in practice mode keeps the same PlayLayer, so init() never ran for it). Nothing may
+            // still be held: no queued input, no phantom press, and if the buffer had delivered a
+            // press whose release died with the attempt, the button is released in the game.
+            if (buf.attemptReset && !this->m_isDead) {
+                buf.attemptReset = false;
+                resetPending();
+                buf.realInput = false;
+                buf.appliedInput = false;
+                buf.held1 = buf.held2 = false;
+                buf.autoReleased = false;
+                buf.autoDash = false;
+                buf.rapid = 0;
+                buf.sinceInput = 999;
+                if (buf.needRespawnRelease) {
+                    buf.needRespawnRelease = false;
+                    sendButton(layer, false);
+                }
+            }
             if (buf.enabled) {
                 buf.usedThisAttempt = true;
             }
