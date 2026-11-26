@@ -1,4 +1,4 @@
-// Click Before Frames v2.95 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v2.96 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -21,6 +21,7 @@
 #include "prediction_policy.hpp"
 #include "wave_rescue_policy.hpp"
 #include "menu_shortcut.hpp"
+#include "bypass_policy.hpp"
 #include <Geode/Geode.hpp>
 #include <Geode/modify/CCCircleWave.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
@@ -58,6 +59,9 @@ using namespace geode::prelude;
 
 namespace {
     constexpr int HOOK_PRIORITY = -1000000;
+    // v2.96: Tab, as a Windows virtual-key code (GD's enumKeyCodes use the same numbers, so
+    // this works both for the keyboard event and for GetAsyncKeyState).
+    constexpr int BYPASS_VK = 0x09;
     constexpr float TICK = 0.25f;
     constexpr size_t PANEL_LINES = 8;
     constexpr int SPIDER_LAND = 20;  // v2.15: ticks on a surface after a spider input = safe (v2.81: 12 -> 20, spikes just past the landing were unseen)
@@ -217,6 +221,11 @@ namespace {
         bool isPlayer1 = true;
 
         bool enabled = true;
+        // v2.96: holding Tab turns the buffer off for as long as it is held; `stageEnabled`
+        // keeps what the F6 stage itself says, so letting go gives that stage straight back.
+        bool stageEnabled = true;
+        bypass_policy::State bypass;
+        menu_shortcut::Counter menuTaps;  // v2.96: 4 quick F3 taps open the menu
         int stage = 0;
         int ticksAll = 2;
         int ticksWave = 2;
@@ -339,6 +348,10 @@ namespace {
     } buf;
 
     std::string stageText();
+    void setBypass(bool held);
+    bool bypassKeyDown();
+    void pollBypass();
+    void releaseBypassForMenu();
 
     // v2.23 unlocked FPS: GD runs round(max(1, frameTime * 240)) physics steps per frame,
     // so only 60 / 120 / 240 FPS give 240 steps a second (144 FPS -> 288, 360 FPS -> 360).
@@ -598,7 +611,10 @@ namespace {
 
     void applyStage() {
         auto const& s = STAGES[buf.stage];
-        buf.enabled = s.enabled;
+        // v2.96: the stage decides whether the buffer is on at all; a held bypass key only
+        // takes it away for as long as it is held, so the stage is back the moment it's up.
+        buf.stageEnabled = s.enabled;
+        buf.enabled = bypass_policy::bufferActive(buf.stageEnabled, buf.bypass.held);
         if (s.custom) {
             // v2.78: one custom value for every gamemode (wave and ship included), no cap
             // besides the MAX_TICKS safety ceiling so a typed-in huge number can't overflow.
@@ -737,6 +753,58 @@ namespace {
         buf.appliedInput = down;
         layer->handleButton(down, 1, buf.isPlayer1);
         buf.injecting = false;
+    }
+
+    // v2.96: the menu always opens paused, and a bypass held while you sit in the pause
+    // menu would be a state you can't see, so it is released as the menu opens.
+    void releaseBypassForMenu() {
+        if (buf.bypass.held) {
+            setBypass(false);
+        }
+    }
+
+    // v2.96 hold-Tab bypass: hand the game exactly what you are holding right now and drop
+    // anything the buffer was still waiting to deliver. Predictions stay off until the key
+    // is released, then the same stage and settings are simply back. Nothing is drawn or
+    // logged about it - the buffer just steps out of the way while the key is down.
+    void setBypass(bool held) {
+        if (buf.bypass.held == held) {
+            return;
+        }
+        buf.bypass.held = held;
+        resetPending();
+        buf.autoReleased = false;
+        buf.autoDash = false;
+        buf.rapid = 0;
+        buf.sinceInput = 999;
+        applyStage();
+        // a path the buffer drew must not stay on screen while it is bypassed
+        if (buf.pathNode) {
+            buf.pathNode->clear();
+        }
+        auto* layer = GameManager::get()->m_playLayer;
+        if (layer && buf.appliedInput != buf.realInput) {
+            sendButton(layer, buf.realInput);
+        }
+        refreshPanel();
+    }
+
+    // Windows key state for the bypass key. GD's key codes are Windows virtual-key codes,
+    // so the same number works here. Only polled while a bypass is active.
+    bool bypassKeyDown() {
+        return (GetAsyncKeyState(BYPASS_VK) & 0x8000) != 0;
+    }
+
+    // Called once per physics step. The keyboard event path already reacts to the press and
+    // the release; this catches a key-up that never arrived (alt-tab while holding Tab),
+    // which would otherwise leave the buffer bypassed for good. It never starts a bypass.
+    void pollBypass() {
+        if (!buf.bypass.held) {
+            return;
+        }
+        if (!bypassKeyDown()) {
+            setBypass(false);
+        }
     }
 
     void pressGhost(PlayerObject* ghost, bool down) {
@@ -4523,7 +4591,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.95 loaded (GD 2.2091). F3 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v2.96 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4581,6 +4649,8 @@ class $modify(BufPlayLayer, PlayLayer) {
             return false;
         }
         dropGhosts();
+        // v2.96: a key held across a restart / level change isn't a deliberate bypass
+        buf.bypass.reset();
         readSettings();
         applyStage();
         exportLines.clear();
@@ -4672,7 +4742,7 @@ class $modify(BufPlayLayer, PlayLayer) {
             buf.panelLines.push_back(line);
         }
 
-        auto* hint = CCLabelBMFont::create("F6 stage  F3 menu  F8 copy log  F9 console  F10 path  F11 forget", "chatFont.fnt");
+        auto* hint = CCLabelBMFont::create("F6 stage  F3 x4 menu  F8 copy log  F9 console  F10 path  F11 forget", "chatFont.fnt");
         hint->setScale(0.45f);
         hint->setColor({ 160, 190, 255 });
         hint->setAnchorPoint({ 0.5f, 0.5f });
@@ -4849,6 +4919,9 @@ class $modify(BufPlayerObject, PlayerObject) {
         if (layer && this == layer->m_player1) {
             ++tickCount;
             ++logClock;
+            // v2.96: the bypass key is read from the OS every step, so a key-up lost while
+            // the game was out of focus still brings the buffer straight back.
+            pollBypass();
             if (buf.enabled) {
                 buf.usedThisAttempt = true;
             }
@@ -5024,14 +5097,27 @@ class $modify(BufPlayerObject, PlayerObject) {
 class $modify(BufKeyboard, CCKeyboardDispatcher) {
     bool dispatchKeyboardMSG(enumKeyCodes key, bool isKeyDown, bool isKeyRepeat, double timestamp) {
         auto* layer = GameManager::get()->m_playLayer;
-        // v2.85: the menu opens with plain F3 (it used to need Alt+F10). F10 stays the
-        // path-view toggle, so the two never collide.
-        if (menu_shortcut::shouldOpen(key == KEY_F3, isKeyDown, isKeyRepeat, layer != nullptr)) {
+        // v2.96: four quick F3 taps open the menu (v2.85-v2.95 opened it on one press). One
+        // press now does nothing, so a stray F3 while playing can't pause the level.
+        bool opened = false;
+        buf.menuTaps.feed(key == KEY_F3, isKeyDown, isKeyRepeat, layer != nullptr,
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(), opened);
+        if (opened) {
+            releaseBypassForMenu();
             if (!layer->m_isPaused) {
                 layer->pauseGame(true);
             }
             BufferMenu::open();
             return true;
+        }
+        if (!isKeyRepeat && static_cast<int>(key) == BYPASS_VK) {
+            // v2.96: hold Tab to step out of the buffer's way, let go to get it back. Only in
+            // a level, and the event is still passed on so nothing else that listens loses its
+            // key state.
+            if (layer && !layer->m_isPaused) {
+                setBypass(isKeyDown);
+            }
+            return CCKeyboardDispatcher::dispatchKeyboardMSG(key, isKeyDown, isKeyRepeat, timestamp);
         }
         if (isKeyDown && !isKeyRepeat && layer) {
             int k = static_cast<int>(key);
