@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+permissions:
+  contents: write
 jobs:
   build:
     name: Windows
@@ -19,9 +21,27 @@ jobs:
     runs-on: ubuntu-latest
     needs: ['build']
     steps:
+      - uses: actions/checkout@v4
       - uses: geode-sdk/build-geode-mod/combine@main
         id: build
       - uses: actions/upload-artifact@v4
         with:
           name: Build Output
           path: ${{ steps.build.outputs.build-output }}
+      # Mirror the ready-to-install .geode into package/ on the branch that
+      # triggered the run, so the binary can be fetched with plain git.
+      - name: Commit the packaged build
+        run: |
+          out="${{ steps.build.outputs.build-output }}"
+          echo "build output: $out"
+          ls -la "$out" || true
+          mkdir -p package
+          if [ -d "$out" ]; then cp -f "$out"/*.geode package/ || true; else cp -f "$out" package/ || true; fi
+          ls -la package
+          git config user.name "build relay"
+          git config user.email "build@relay.local"
+          git add -f package
+          if git diff --cached --quiet; then echo "nothing new to commit"; else
+            git commit -m "ci: packaged build for ${GITHUB_SHA::7} [skip ci]"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
