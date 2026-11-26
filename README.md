@@ -7,10 +7,10 @@ The buffer menu opens with four quick F3 taps while in a level (it used to be on
 
 Practice use only; do not use for verified or leaderboard runs. Auto-input features can act without an on-screen watermark.
 
-## Geometry Dash 2.2091 (Geode v6, v2.96.2)
+## Geometry Dash 2.2091 (Geode v6, v2.96.3)
 This build targets **Geometry Dash 2.2091** with **Geode 6.0.0 or newer**; it no longer loads on 2.2081. The 2.2091 port is a compatibility update, not a change of prediction rules - all v2.94 behaviour is the same.
 
-A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v2.96.2, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
+A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v2.96.3, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
 
 - 2.209 removed the replay path: `PlayLayer::init` is `(GJGameLevel*, bool dontCreateObjects)` now, so the level hook follows that signature.
 - Geode v6 dropped the `gd::` namespace (`gd::vector` is `std::vector`), and `Mod::getSaveDir()` returns an `asp::fs::Path`. Saved level memory, run-check recordings and `console-export.txt` still live in the same folder; the path is converted through its native form so Windows user names outside the ANSI codepage keep working.
@@ -121,3 +121,7 @@ The ghost copies the player's gravity and direction for both upright and upside-
   and the stale "still holding" state survived into the new body). The first live step after a death now
   clears the queue, the held/pressed flags and the ghost button state, and releases the button in the game
   if the buffer had applied a press whose release was lost.
+- v2.96.3: the first live step after a death always starts the new body with the button up. Wave keeps its
+  own hold alive across a checkpoint respawn and a press made during the death animation does too, so the
+  release is sent even when the buffer does not think it delivered a press. (A hold you carry through a
+  death is let go at the respawn; press again to keep holding.)

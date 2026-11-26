@@ -1,4 +1,4 @@
-// Click Before Frames v2.96.2 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v2.96.3 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -250,8 +250,7 @@ namespace {
         // v2.96.2: a death leaves nothing held. These carry the "start the new body clean" work
         // over to the first physics step of the next body (in practice mode a checkpoint respawn
         // never calls PlayLayer::init, so the old state used to survive it).
-        bool attemptReset = false;        // the next live step has to clear the input bookkeeping
-        bool needRespawnRelease = false;  // the game may still be holding a press we lost the release for
+        bool attemptReset = false;        // the next live step has to start the body with nothing held
         bool auto1 = false, auto2 = false;   // an orb auto-click is currently held on this ghost
         bool orbTiming = true;       // v2.26: orb clicks at specific timings inside the orb
         int orbClickDelay = 0;       // v2.26: ghost orb auto-clicks wait this many ticks into the orb
@@ -4596,7 +4595,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.96.2 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v2.96.3 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4642,7 +4641,6 @@ class $modify(BufPlayLayer, PlayLayer) {
         // dropped here, and `realInput` used to keep saying "still holding", which re-pressed the
         // button by itself on the next body. Both are cleared now: the game is told the button is
         // up on the next live step, and nothing is considered held.
-        buf.needRespawnRelease = buf.appliedInput;
         buf.attemptReset = true;
         buf.realInput = false;
         buf.appliedInput = false;
@@ -4674,7 +4672,6 @@ class $modify(BufPlayLayer, PlayLayer) {
         buf.bypass.reset();
         // v2.96.2: brand new player objects, nothing of the last attempt is still held
         buf.attemptReset = false;
-        buf.needRespawnRelease = false;
         buf.realInput = false;
         buf.appliedInput = false;
         buf.held1 = buf.held2 = false;
@@ -4964,10 +4961,11 @@ class $modify(BufPlayerObject, PlayerObject) {
                 buf.autoDash = false;
                 buf.rapid = 0;
                 buf.sinceInput = 999;
-                if (buf.needRespawnRelease) {
-                    buf.needRespawnRelease = false;
-                    sendButton(layer, false);
-                }
+                // v2.96.3: always start the new body with the button up. In wave the game keeps
+                // its own hold alive across a respawn (and a press made during the death
+                // animation does too), so a stale hold is released here whether or not the
+                // buffer thinks it delivered one.
+                sendButton(layer, false);
             }
             if (buf.enabled) {
                 buf.usedThisAttempt = true;
