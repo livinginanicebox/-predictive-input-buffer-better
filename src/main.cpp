@@ -4649,8 +4649,10 @@ class $modify(BufPlayLayer, PlayLayer) {
             return false;
         }
         dropGhosts();
-        // v2.96: a key held across a restart / level change isn't a deliberate bypass
+        // v2.96: a key held across a restart / level change never sends a new press event, so
+        // the state is taken from the key itself: still held -> still bypassed.
         buf.bypass.reset();
+        buf.bypass.held = bypassKeyDown();
         readSettings();
         applyStage();
         exportLines.clear();
