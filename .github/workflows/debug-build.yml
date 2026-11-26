@@ -43,7 +43,6 @@ jobs:
         continue-on-error: true
       - name: Configure and build
         id: build
-        if: steps.sdk.outcome == 'success'
         shell: bash
         run: |
           set -o pipefail
@@ -58,9 +57,19 @@ jobs:
         if: always()
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SDK_OUTCOME: ${{ steps.sdk.outcome }}
           BUILD_OUTCOME: ${{ steps.build.outcome }}
         run: |
-          python3 scripts/relay_log.py
-          gh api "repos/${{ github.repository }}/comments" --method POST --input payload.json || echo "relay post failed"
+          mkdir -p buildlogs
+          cp configure.log build.log buildlogs/ 2>/dev/null || true
+          echo "sdk=$SDK_OUTCOME build=$BUILD_OUTCOME" > buildlogs/status.txt
+          python3 scripts/relay_log.py > buildlogs/summary.txt || true
+      - name: Commit the logs back
+        if: always()
+        shell: bash
+        run: |
+          git config user.name "log relay"
+          git config user.email "relay@example.com"
+          git add -f buildlogs
+          git commit -m "ci debug logs [skip ci]" || true
+          git push || echo "push failed"
