@@ -3,7 +3,7 @@
 	"gd": {
 		"win": "2.2091"
 	},
-	"version": "v2.97.1",
+	"version": "v2.97.2",
 	"id": "basu.input-buffer",
 	"name": "Click Before Frames",
 	"developer": "BASU",
@@ -34,8 +34,8 @@
 		"survival-press": {
 			"type": "bool",
 			"name": "Survival scan: may press for you",
-			"description": "Off = the scan may only let go of the button, never press it, so it never holds on its own. On = it may also hold or tap when that lives longer.",
-			"default": true
+			"description": "Off (default) = the scan may only let go of the button, never press it, so it never clicks or holds on its own. On = it may also hold or tap when that lives clearly longer than what you are doing.",
+			"default": false
 		},
 		"survival-window": {
 			"type": "int",

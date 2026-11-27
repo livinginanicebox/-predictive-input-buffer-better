@@ -1,4 +1,4 @@
-// Click Before Frames v2.97.1 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v2.97.2 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -260,7 +260,7 @@ namespace {
         int survivalHorizon = 2400;   // ticks each policy may run (2400 = 10 s)
         int survivalStride = 240;     // ticks between scans
         int survivalWindow = 240;     // only step in when what you're doing dies within this
-        bool survivalPress = true;    // v2.97.1: off = the scan may only let go, never press for you
+        bool survivalPress = false;   // v2.97.2: off (default) = the scan may only let go, never press
         int survivalTap = 12;         // ticks per half of the tap rhythm
         survival_policy::Action autoAction = survival_policy::Action::None;
         int autoActionTicks = 0;
@@ -4198,7 +4198,19 @@ namespace {
             }
             best = std::max(best, t);
         }
-        return survival_policy::choose(current, cur, hold, release, tap, deadline, SURVIVAL_MARGIN);
+        auto choice = survival_policy::choose(current, cur, hold, release, tap, deadline, SURVIVAL_MARGIN);
+        // v2.97.2: a hold the scan started is only let go when letting go is itself safe past the
+        // deadline. Handing it back because "nothing beats it" would end the hold after one stride,
+        // which is a click the player never made - exactly what the simulation did not test.
+        if (!choice.takeOver && buf.autoAction == Action::Hold && !buf.realInput) {
+            int rel = survivalRun(layer, p1, p2, dual, Action::Release, deadline + 1);
+            if (rel <= deadline) {
+                choice.action = Action::Hold;
+                choice.ticks = rel;
+                choice.takeOver = true;
+            }
+        }
+        return choice;
     }
 
     // Called once per physics step, before the buffer delivers anything. Your own click always
@@ -4756,7 +4768,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.97.1 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v2.97.2 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
