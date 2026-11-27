@@ -1,4 +1,4 @@
-// Click Before Frames v2.97.3 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v2.98 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -2147,6 +2147,16 @@ namespace {
             return true;
         };
 
+        // v2.98: an orb counts as "clicked by this press" only when it fires at the press, within
+        // a couple of ticks. A ghost that is still holding when it reaches a ring later activates
+        // it then, and calling that "your click" is what hid every early orb press: pressing now
+        // looked safe (the held ghost clicked the ring it fell into), so nothing was ever moved
+        // onto the orb, and the real tap - which ends far earlier - never fired it at all.
+        auto usesNearPress = [&](int k) {
+            return prediction_policy::sameOrb(targetOrb, buf.usedOrb) &&
+                prediction_policy::orbFiresAtPress(buf.orbUsedTick, k, st(4));
+        };
+
         if (touch >= 0 && touch <= window) {
             // 2. Pressing now already uses an orb (e.g. held into it).
             int now = simulate(layer, p1, p2, dual, 0, true, horizon, releaseAfter, horizon, &end);
@@ -2162,7 +2172,7 @@ namespace {
             // held player happens to pass through an orb many ticks later (that press is not an
             // orb click, and re-timing it was a waste of the budget). A press that activates an
             // orb and already survives the look-ahead counts too: a working click is left alone.
-            bool nowUses = (buf.orbUsedTick >= 0 && buf.orbUsedTick <= st(2)) || (buf.orbUsedTick >= 0 && now >= horizon);
+            bool nowUses = usesNearPress(0);
             // If the player's actual timing already activates an orb, never change
             // that decision just because a prediction dislikes the resulting path.
             // v2.86: with "Orb timing" on, a press inside the orb whose path does NOT
@@ -2220,7 +2230,7 @@ namespace {
             // Learned timings are valid only for the specific first orb ahead.
             if (targetOrb && learned > 0 && learned <= window) {
                 int ret = simulate(layer, p1, p2, dual, learned, true, horizon, releaseAfter, horizon, &end);
-                if (prediction_policy::sameOrb(targetOrb, buf.usedOrb) && ret >= horizon) {
+                if (usesNearPress(learned) && ret >= horizon) {
                     *landed = ret;
                     buf.orbClick = buf.assumeOrbs;
                     return learned;
@@ -2243,7 +2253,7 @@ namespace {
                         break;
                     }
                     int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &end);
-                    bool uses = prediction_policy::sameOrb(targetOrb, buf.usedOrb);
+                    bool uses = usesNearPress(k);
                     if (buf.explain) {
                         trace += fmt::format(" +{}:{}{}", k, ret, uses ? "o" : "-");
                     }
@@ -2376,7 +2386,7 @@ namespace {
                     break;
                 }
                 int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &end);
-                bool uses = prediction_policy::sameOrb(targetOrb, buf.usedOrb);
+                bool uses = usesNearPress(k);
                 if (buf.explain) {
                     trace += fmt::format(" +{}:{}{}", k, ret, uses ? "o" : "-");
                 }
@@ -4794,7 +4804,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.97.3 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v2.98 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {

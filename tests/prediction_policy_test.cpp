@@ -63,5 +63,17 @@ int main2() {
     assert(straightBand(true) < straightBand(false));
     assert(straightBand(true) >= 60.f);
     assert(straightBand(false) >= 90.f);
+
+    // v2.98: an orb is only this press's click when it fires at the press.
+    {
+        using prediction_policy::orbFiresAtPress;
+        assert(orbFiresAtPress(0, 0, 4));     // fired by the press itself
+        assert(orbFiresAtPress(1, 0, 4));
+        assert(orbFiresAtPress(12, 8, 4));    // press delayed to tick 8
+        assert(!orbFiresAtPress(20, 0, 4));   // the held ghost ran into the ring later: not a click
+        assert(!orbFiresAtPress(30, 8, 4));
+        assert(!orbFiresAtPress(-1, 0, 4));   // never used
+    }
+
     return 0;
 }

@@ -16,6 +16,13 @@ namespace prediction_policy {
         return target && target == used;
     }
 
+    // v2.98: an orb counts as this press's click only when it fires at the press itself (a couple
+    // of ticks of slack). A ghost that is still holding when it reaches a ring later activates it
+    // then - that is not a click, and treating it as one hid every early orb press.
+    constexpr bool orbFiresAtPress(int usedTick, int pressTick, int slack) {
+        return usedTick >= 0 && usedTick <= pressTick + slack;
+    }
+
     constexpr bool betterOrbFallback(bool enabled, bool sameTarget, int survival, int bestSurvival) {
         return enabled && sameTarget && survival > bestSurvival;
     }
