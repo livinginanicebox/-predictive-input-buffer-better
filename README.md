@@ -30,10 +30,10 @@ actually live, and the one that lives longest is what the game is then told to d
 
 Practice use only; do not use for verified or leaderboard runs. Auto-input features can act without an on-screen watermark.
 
-## Geometry Dash 2.2091 (Geode v6, v2.99)
+## Geometry Dash 2.2091 (Geode v6, v3.0)
 This build targets **Geometry Dash 2.2091** with **Geode 6.0.0 or newer**; it no longer loads on 2.2081. The 2.2091 port is a compatibility update, not a change of prediction rules - all v2.94 behaviour is the same.
 
-A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v2.99.0, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
+A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v3.0.0, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
 
 - 2.209 removed the replay path: `PlayLayer::init` is `(GJGameLevel*, bool dontCreateObjects)` now, so the level hook follows that signature.
 - Geode v6 dropped the `gd::` namespace (`gd::vector` is `std::vector`), and `Mod::getSaveDir()` returns an `asp::fs::Path`. Saved level memory, run-check recordings and `console-export.txt` still live in the same folder; the path is converted through its native form so Windows user names outside the ANSI codepage keep working.
@@ -178,3 +178,8 @@ The ghost copies the player's gravity and direction for both upright and upside-
   lands on the orb is taken when it clears the look-ahead OR clearly buys time with the crash left being the
   next obstacle (the late-crash line) - the "two frames of buffer would get me past" case. The whole-look-ahead
   rule now only applies to presses that already work, and the miss-the-orb fallback needs a frame of gain.
+- v3.0: early releases get buffered for real. A release no longer has to clear the whole look-ahead (or a
+  90-tick late line) to be moved: if letting go now dies, holding a frame and a half longer and pushing the
+  crash further out is enough, and the log says `release late save`. Auto-release now simulates holding both
+  ways (pressing and staying pressed, and continuing the hold) so holding can actually read as dangerous, and
+  it says once why it is silent in a normal run (practice-only) or why letting go was not worth doing.

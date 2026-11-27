@@ -1,4 +1,4 @@
-// Click Before Frames v2.99 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v3.0 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -289,6 +289,8 @@ namespace {
         bool autoRelease = false;    // v2.4: wave auto-release (practice mode only)
         int autoWindow = 6;          // v2.4: hold must die within this many ticks to auto-release
         bool autoReleased = false;   // v2.4: we released for you; your real release is swallowed
+        bool autoReleaseToldNormal = false;  // v3.0: said why auto-release is silent in a normal run
+        bool autoReleaseToldWeak = false;    // v3.0: said why letting go was not worth doing for you
         int spamGap = 16;            // v2.5.2: inputs closer than this (ticks) count toward wave spam
         bool waveMargin = true;      // v2.10: center wave saves in the safe window (1 tick of room)
         bool waveV46 = false;        // v2.7: use the old v4.6 wave rules instead of the cube-style ones
@@ -4051,15 +4053,33 @@ namespace {
         // at most, so 90 would make the rule dead code. It still has to buy 4 frames over pressing
         // now and live 2 frames past the late-crash line, and it never applies to v4.6 rules.
         int lateLine = anyWave ? std::min(st(buf.lateCrash), st(24)) : st(buf.lateCrash);
+        int lateGain = anyWave ? 16 : 12;
+        // v3.0: an early RELEASE is the same problem in reverse. Letting go two frames too soon
+        // is what kills you, and holding a couple of frames longer is exactly the fix - but a
+        // release used to need the whole look-ahead clear (or a late save 90+ ticks past the
+        // release), which almost never happens in a tight level, so "I let go a bit early" was
+        // never adjusted at all. A release only has to buy a frame and a half and push the crash
+        // further out than letting go now does.
+        if (!down) {
+            lateLine = std::min(lateLine, st(6));
+            lateGain = 6;
+        }
         if (saved <= 0 && !(anyWave && buf.waveV46) && buf.lateCrash > 0 && lateLine > 0 && dbgBestK > 0 && dbgBestRet > 0) {
             int crashAt = dbgBestK + dbgBestRet;
-            if (dbgBestRet >= lateLine && crashAt >= base + st(anyWave ? 16 : 12)) {
+            if (dbgBestRet >= lateLine && crashAt >= base + st(lateGain)) {
                 saved = dbgBestK;
                 landed = dbgBestRet;
                 lateSave = true;
                 if (buf.explain) {
-                    say("late save: nothing clears the {}t look-ahead, +{}t survives {}t and crashes at t{} ({}t later than pressing now, past "
-                        "the {}t late-crash line)", horizon, saved, landed, crashAt, crashAt - base, lateLine);
+                    if (!down) {
+                        say("release late save: letting go now dies in {}t, holding {}t longer lives {}t and crashes at t{} ({}t later, past the "
+                            "{}t late-crash line) - no timing clears the {}t look-ahead", base, saved, landed, crashAt, crashAt - base, lateLine,
+                            horizon);
+                    }
+                    else {
+                        say("late save: nothing clears the {}t look-ahead, +{}t survives {}t and crashes at t{} ({}t later than pressing now, past "
+                            "the {}t late-crash line)", horizon, saved, landed, crashAt, crashAt - base, lateLine);
+                    }
                 }
             }
         }
@@ -4338,6 +4358,11 @@ namespace {
             return;
         }
         if (!layer->m_isPracticeMode && !buf.autoNormalRuns) {
+            // v3.0: silently doing nothing here is why auto-release looked broken in a normal run.
+            if (!buf.autoReleaseToldNormal) {
+                buf.autoReleaseToldNormal = true;
+                say("auto release is practice-only: turn on \"Auto-release in normal runs\" to use it here");
+            }
             return;
         }
         if (!buf.queue.empty() || !buf.realInput || !buf.appliedInput || !buf.isPlayer1 || !buf.ghost1) {
@@ -4358,11 +4383,18 @@ namespace {
 
         int window = st(std::clamp(buf.autoWindow, 2, 24));
         buf.sawMover = false;
-        buf.skipPress = true;
         buf.orbClick = buf.assumeOrbs;
         SimEnd end;
+        // v3.0: "holding" is simulated both ways - pressing now and staying pressed, and
+        // continuing the hold you are already in - and the longer of the two is used. The old
+        // single run relied on the ghost inheriting your held button; when it does not, the
+        // "hold" run was really a released run, so holding never looked dangerous and
+        // auto-release never fired.
         int hold = simulate(layer, p1, p2, dual, 0, true, window, -1, window, &end);
+        buf.skipPress = true;
+        int keep = simulate(layer, p1, p2, dual, 0, true, window, -1, window, &end);
         buf.skipPress = false;
+        hold = std::max(hold, keep);
         if (hold >= window || buf.ghostHitPortal) {
             return;
         }
@@ -4376,6 +4408,12 @@ namespace {
         int release = simulateOrbs(layer, p1, p2, dual, 0, false, horizon, -1, horizon, &end);
         buf.trackMovers = false;
         if (release < horizon && release < hold + st(10)) {
+            // v3.0: say it once, so "auto release does nothing" can be told apart from "it
+            // decided letting go was not better".
+            if (buf.explain && !buf.autoReleaseToldWeak) {
+                buf.autoReleaseToldWeak = true;
+                say("auto release: letting go lives {}t, holding dies in {}t - not a clear enough gain to let go for you", release, hold);
+            }
             return;
         }
         if (buf.avoidMovers && buf.sawMover) {
@@ -4833,7 +4871,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.99 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v3.0 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4887,6 +4925,8 @@ class $modify(BufPlayLayer, PlayLayer) {
         buf.appliedInput = false;
         buf.autoReleased = false;
         buf.autoDash = false;
+        buf.autoReleaseToldNormal = false;
+        buf.autoReleaseToldWeak = false;
         buf.rapid = 0;
         buf.sinceInput = 999;
         // v2.96.1: a held bypass never outlives the attempt. Holding Tab through a death used
