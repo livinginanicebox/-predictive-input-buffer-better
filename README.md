@@ -30,10 +30,10 @@ actually live, and the one that lives longest is what the game is then told to d
 
 Practice use only; do not use for verified or leaderboard runs. Auto-input features can act without an on-screen watermark.
 
-## Geometry Dash 2.2091 (Geode v6, v2.98)
+## Geometry Dash 2.2091 (Geode v6, v2.99)
 This build targets **Geometry Dash 2.2091** with **Geode 6.0.0 or newer**; it no longer loads on 2.2081. The 2.2091 port is a compatibility update, not a change of prediction rules - all v2.94 behaviour is the same.
 
-A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v2.98.0, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
+A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v2.99.0, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
 
 - 2.209 removed the replay path: `PlayLayer::init` is `(GJGameLevel*, bool dontCreateObjects)` now, so the level hook follows that signature.
 - Geode v6 dropped the `gd::` namespace (`gd::vector` is `std::vector`), and `Mod::getSaveDir()` returns an `asp::fs::Path`. Saved level memory, run-check recordings and `console-export.txt` still live in the same folder; the path is converted through its native form so Windows user names outside the ANSI codepage keep working.
@@ -173,3 +173,8 @@ The ghost copies the player's gravity and direction for both upright and upside-
   spare. An orb now only counts as this press's click when it fires at the press itself (4 ticks of slack,
   `prediction_policy::orbFiresAtPress`), for the press-now run, the learned timing and every candidate tick, so
   the search compares real orb clicks and moves an early press onto the orb.
+- v2.99: an early orb press is now judged against doing nothing, not against a press-now run that clicked a ring
+  on the way down. When the press does not fire the orb itself, the bar to beat is the idle run, and a tick that
+  lands on the orb is taken when it clears the look-ahead OR clearly buys time with the crash left being the
+  next obstacle (the late-crash line) - the "two frames of buffer would get me past" case. The whole-look-ahead
+  rule now only applies to presses that already work, and the miss-the-orb fallback needs a frame of gain.

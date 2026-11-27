@@ -1,4 +1,4 @@
-// Click Before Frames v2.98 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v2.99 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -2161,6 +2161,22 @@ namespace {
             // 2. Pressing now already uses an orb (e.g. held into it).
             int now = simulate(layer, p1, p2, dual, 0, true, horizon, releaseAfter, horizon, &end);
             buf.orbNowRet = now;
+            // v2.99: does this press fire the orb itself? If not, "press now" is not the bar to beat.
+            // A tap that ends before the ring just leaves you falling, so the run that matters for
+            // comparison is doing nothing at all - otherwise a phantom orb activation later in the
+            // press-now run made every real orb timing look worse than pressing now.
+            bool clickFiresOrb = usesNearPress(0);
+            if (!clickFiresOrb && now > 0) {
+                int idle = simulate(layer, p1, p2, dual, 0, false, horizon, -1, horizon, &end);
+                if (idle < now) {
+                    now = idle;
+                    buf.orbNowRet = now;
+                    if (buf.explain) {
+                        trace += fmt::format(" (idle {}t)", idle);
+                    }
+                }
+            }
+            bool pressAlreadyWorks = clickFiresOrb && now >= horizon;
             // v2.94: a ship press that already survives is NEVER moved. Holding a feather back to
             // catch an orb would change the ship's line for those ticks - ship orb clicks are
             // aligned only when the press as made is not safe (then the orb is what saves it).
@@ -2291,9 +2307,19 @@ namespace {
                     // longer is an improvement - refusing them all meant the mod said "your click
                     // beats the timing" and let a wrong click through untouched.
                     bool lateOK = retimingOrb && buf.lateCrash > 0 && ret >= st(buf.lateCrash) && ret >= now + st(12);
+                    // v2.99: a press that does not fire the orb is compared against doing nothing, not
+                    // against a press-now run that happens to have clicked a ring on the way down. Such
+                    // a tick is taken when it clears the whole look-ahead, or when it clearly buys time
+                    // and the crash it leaves is the next obstacle (the same late-crash line best-effort
+                    // saves already use) - that is the "2 frames of buffer would get me past" case.
+                    bool lateFromIdle = !retimingOrb && !clickFiresOrb && buf.lateCrash > 0 && ret >= st(buf.lateCrash) &&
+                        ret >= now + st(12);
                     bool good = retimingOrb ? (ret >= horizon || (now < horizon && ret > now) || lateOK)
-                                            : ret >= std::min(now, horizon);
-                    if (!uses || !good || (!retimingOrb && (fullOnly || k > legacyAlignEnd) && ret < horizon)) {
+                                            : pressAlreadyWorks ? ret >= std::min(now, horizon)
+                                                                : (ret >= horizon || lateFromIdle || ret >= now + st(4));
+                    // the whole-look-ahead rule is for clicks that already work: when the press misses
+                    // the orb it is exactly the click that needs moving, so it does not apply
+                    if (!uses || !good || (!retimingOrb && pressAlreadyWorks && (fullOnly || k > legacyAlignEnd) && ret < horizon)) {
                         continue;
                     }
                     // v2.94: an airborne press that already works without the orb is only moved
@@ -2362,7 +2388,10 @@ namespace {
                     // orb. An airborne / ship press in front of an orb is that orb's click, so it
                     // is still held onto it when the orb path lives long enough for the crash to
                     // clearly be the NEXT obstacle (the same late-crash line best-effort saves use).
-                    if (now < horizon || fallbackRet >= st(buf.lateCrash) || fallbackRet >= now) {
+                    // v2.99: when the press misses the orb, the fallback only has to beat doing
+                    // nothing - but by at least a frame, so a tick that changes nothing isn't taken.
+                    int margin = clickFiresOrb ? 0 : st(4);
+                    if (now < horizon || fallbackRet >= st(buf.lateCrash) || fallbackRet >= now + margin) {
                         found = fallbackK;
                         *landed = fallbackRet;
                     }
@@ -4804,7 +4833,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.98 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v2.99 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
