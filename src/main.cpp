@@ -1,4 +1,4 @@
-// Click Before Frames v2.97.2 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v2.97.3 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -263,6 +263,10 @@ namespace {
         bool survivalPress = false;   // v2.97.2: off (default) = the scan may only let go, never press
         int survivalTap = 12;         // ticks per half of the tap rhythm
         survival_policy::Action autoAction = survival_policy::Action::None;
+        // v2.97.3: the scan let go of a button you were holding. The game stays released until you
+        // touch the button again - nothing may re-press it in the meantime (that was a click you
+        // never made). Unlike `autoReleased` this is not tied to wave / robot auto-release.
+        bool pickReleased = false;
         int autoActionTicks = 0;
         int sinceScan = 0;
         int simTapEvery = 0;          // tap rhythm handed to simulate() for the current run
@@ -3427,6 +3431,7 @@ namespace {
         buf.isPlayer1 = isPlayer1;
         // v2.97: your own click always wins over the survival scan
         buf.autoAction = survival_policy::Action::None;
+        buf.pickReleased = false;
         buf.sinceScan = std::max(12, buf.survivalStride);
         buf.realInput = down;
         buf.shipStraight = false;
@@ -4122,7 +4127,7 @@ namespace {
         // A delayed input that was waiting is dropped; the game gets what you're really
         // holding now (otherwise, with the buffer switched off, it never would).
         auto* layer = GameManager::get()->m_playLayer;
-        if (layer && !buf.autoReleased && buf.appliedInput != buf.realInput) {
+        if (layer && !buf.autoReleased && !buf.pickReleased && buf.appliedInput != buf.realInput) {
             sendButton(layer, buf.realInput);
         }
         applyStage();
@@ -4225,7 +4230,12 @@ namespace {
         if (layer->m_isPlatformer || (layer->m_level && layer->m_level->m_twoPlayerMode)) {
             return;
         }
-        if (!buf.queue.empty() || buf.autoReleased || p1->m_isDead) {
+        // v2.97.3: in ship a press is a held climb and the ship path puts the button back to what
+        // you really hold every step, so the scan stays out of it (unless ship inputs are buffered)
+        if (p1->m_isShip && !buf.shipBuffer) {
+            return;
+        }
+        if (!buf.queue.empty() || p1->m_isDead) {
             return;
         }
         bool dual = layer->m_gameState.m_isDualMode && layer->m_player2;
@@ -4239,18 +4249,34 @@ namespace {
                 buf.sinceScan = std::min(buf.sinceScan * 2, std::max(12, buf.survivalStride) * 8);
             }
             if (choice.takeOver) {
-                if (choice.action != buf.autoAction) {
-                    buf.autoActionTicks = 0;
-                }
                 if (buf.explain || buf.deathLog) {
                     say("survival: {} -> {} ({}t)", survival_policy::name(buf.autoAction), survival_policy::name(choice.action),
                         choice.ticks);
                 }
-                buf.autoAction = choice.action;
+                if (choice.action == survival_policy::Action::Release) {
+                    // v2.97.3: letting go is handed to the game like wave auto-release does it. The
+                    // button is released once and stays released - nothing is driven, nothing is
+                    // re-pressed, and your own release afterwards is swallowed. Driving it instead
+                    // meant handing control back one scan later, and that hand-back pressed the
+                    // button again for a player who was still physically holding: a click they never
+                    // made.
+                    buf.autoAction = survival_policy::Action::None;
+                    if (buf.appliedInput) {
+                        buf.pickReleased = true;
+                        buf.autoDash = false;
+                        sendButton(layer, false);
+                    }
+                }
+                else {
+                    if (choice.action != buf.autoAction) {
+                        buf.autoActionTicks = 0;
+                    }
+                    buf.pickReleased = false;
+                    buf.autoAction = choice.action;
+                }
             }
             else {
-                // nothing imminent: the game follows what you're really holding again, so the
-                // button is never pressed for no reason
+                // nothing imminent: follow what you're really holding again
                 buf.autoAction = survival_policy::Action::None;
             }
         }
@@ -4335,7 +4361,7 @@ namespace {
         if (!buf.shipBuffer && (player->m_isShip || (dual && layer->m_player2->m_isShip))) {
             resetPending();
             buf.autoReleased = false;
-            if (buf.appliedInput != buf.realInput && !survivalDriving()) {
+            if (buf.appliedInput != buf.realInput && !survivalDriving() && !buf.pickReleased) {
                 sendButton(layer, buf.realInput);
             }
             return;
@@ -4347,7 +4373,7 @@ namespace {
         }
 
         if (buf.queue.empty()) {
-            if (buf.appliedInput != buf.realInput && !buf.autoReleased && !survivalDriving()) {
+            if (buf.appliedInput != buf.realInput && !buf.autoReleased && !survivalDriving() && !buf.pickReleased) {
                 sendButton(layer, buf.realInput);
             }
             if (!survivalDriving()) {
@@ -4768,7 +4794,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v2.97.2 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v2.97.3 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -4816,6 +4842,7 @@ class $modify(BufPlayLayer, PlayLayer) {
         // up on the next live step, and nothing is considered held.
         buf.attemptReset = true;
         buf.autoAction = survival_policy::Action::None;
+        buf.pickReleased = false;
         buf.sinceScan = 0;
         buf.realInput = false;
         buf.appliedInput = false;
@@ -4847,6 +4874,9 @@ class $modify(BufPlayLayer, PlayLayer) {
         buf.bypass.reset();
         // v2.96.2: brand new player objects, nothing of the last attempt is still held
         buf.attemptReset = false;
+        buf.pickReleased = false;
+        buf.autoAction = survival_policy::Action::None;
+        buf.sinceScan = 0;
         buf.realInput = false;
         buf.appliedInput = false;
         buf.held1 = buf.held2 = false;
@@ -5130,6 +5160,7 @@ class $modify(BufPlayerObject, PlayerObject) {
                 buf.attemptReset = false;
                 resetPending();
                 buf.autoAction = survival_policy::Action::None;
+                buf.pickReleased = false;
                 buf.sinceScan = 0;
                 buf.realInput = false;
                 buf.appliedInput = false;

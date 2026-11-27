@@ -33,7 +33,7 @@ Practice use only; do not use for verified or leaderboard runs. Auto-input featu
 ## Geometry Dash 2.2091 (Geode v6, v2.97)
 This build targets **Geometry Dash 2.2091** with **Geode 6.0.0 or newer**; it no longer loads on 2.2081. The 2.2091 port is a compatibility update, not a change of prediction rules - all v2.94 behaviour is the same.
 
-A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v2.97.2, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
+A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v2.97.3, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
 
 - 2.209 removed the replay path: `PlayLayer::init` is `(GJGameLevel*, bool dontCreateObjects)` now, so the level hook follows that signature.
 - Geode v6 dropped the `gd::` namespace (`gd::vector` is `std::vector`), and `Mod::getSaveDir()` returns an `asp::fs::Path`. Saved level memory, run-check recordings and `console-export.txt` still live in the same folder; the path is converted through its native form so Windows user names outside the ANSI codepage keep working.
@@ -161,3 +161,8 @@ The ghost copies the player's gravity and direction for both upright and upside-
   gets a press it didn't make. With pressing switched on, a hold the scan starts is kept until letting go is
   itself safe past the window, instead of being handed back after one stride (that early hand-back was a
   short click the player never made, and it wasn't what the simulation tested).
+- v2.97.3: no more clicks you didn't make. Letting go is now handed to the game exactly like wave auto-release
+  (released once, your own release swallowed, nothing driven), instead of being re-driven and then handed back -
+  that hand-back was pressing the button again while you were still physically holding. The scan also stays out
+  of ship (a press there is a held climb and the ship path re-syncs the button constantly) unless ship buffering
+  is on, and a press the scan drives clears the auto-release flag so your own release is never swallowed.
