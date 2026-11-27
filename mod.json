@@ -3,7 +3,7 @@
 	"gd": {
 		"win": "2.2081"
 	},
-	"version": "v2.94.0",
+	"version": "v2.95.0",
 	"id": "basu.input-buffer",
 	"name": "Click Before Frames",
 	"developer": "BASU",
@@ -122,7 +122,7 @@
 		"orb-align-ticks": {
 			"type": "int",
 			"name": "Orb alignment: max delay (ticks)",
-			"description": "How early a press may be and still be moved onto the orb - and how far into the orb an already-inside press may be re-timed. Every tick while you pass through the orb is tried and the middle of the safe click window is used, which is what makes frame-perfect orbs much easier. No frame cap. 32 ticks = 8 frames at 60fps, 60 ticks = 15 frames. Bigger values also need a bigger 'Prediction time budget'. v2.94: if there is no orb inside this window, airborne cube / ship presses probe further ahead (up to 120 ticks / the F6 stage) and are held until a tick inside that orb clears the whole look-ahead, so an orb in open air is no longer skipped because nothing above or below it made the press look like a death.",
+			"description": "How early a press may be and still be moved onto the orb - and how far into the orb an already-inside press may be re-timed. Every tick while you pass through the orb is tried and the middle of the safe click window is used, which is what makes frame-perfect orbs much easier. No frame cap. 32 ticks = 8 frames at 60fps, 60 ticks = 15 frames. Bigger values also need a bigger 'Prediction time budget'. v2.94: if there is no orb inside this window, airborne cube / ship presses probe further ahead (up to 120 ticks / the F6 stage) and are held until a tick inside that orb clears the whole look-ahead, so an orb in open air is no longer skipped because nothing above or below it made the press look like a death. v2.95: the search reaches out to the F6 stage's max delay even when that is more than this window, ground presses probe too, and an orb path that only dies to the obstacle behind the orb is still used (best effort) instead of the press going through unsaved.",
 			"default": 32,
 			"min": 1,
 			"max": 24000
@@ -202,7 +202,7 @@
 		"orb-timing": {
 			"type": "bool",
 			"name": "Orb timing",
-			"description": "For frame-perfect orbs, retry timings while passing through the same orb. v2.94: covers ship orb clicks too. A press made while already inside an orb counts as safe only if it also survives with you half a tick ahead of and behind (see 'Robust saves'). Otherwise every tick of the pass through the same orb is tried: a tick that clears the look-ahead wins, and when your click does not clear it any tick that lives longer is used as well. An early press in front of an orb that has nothing above or below it is still held onto the orb (the orb path has to live past the late-crash line), instead of being applied where it misses the orb - that was the \"some orbs are just skipped\" case. It never picks the last tick you are still touching the orb on. Needs 'Orb alignment' and 'Orb / pad / portal prediction'.",
+			"description": "For frame-perfect orbs, retry timings while passing through the same orb. v2.94: covers ship orb clicks too. A press made while already inside an orb counts as safe only if it also survives with you half a tick ahead of and behind (see 'Robust saves'). Otherwise every tick of the pass through the same orb is tried: a tick that clears the look-ahead wins, and when your click does not clear it any tick that lives clearly longer is used as well. An early press in front of an orb that has nothing above or below it is still held onto the orb (the orb path has to live past the late-crash line), instead of being applied where it misses the orb - that was the \"some orbs are just skipped\" case. It never picks the last tick you are still touching the orb on. Needs 'Orb alignment' and 'Orb / pad / portal prediction'. v2.95: the orb pass is judged over a longer look-ahead (the setting plus one extra well-spaced orb per orb in the pass, capped), so an orb chain whose crash sits just past the old end is buffered instead of reading 'safe now'.",
 			"default": true
 		},
 		"cube-late-crash": {
@@ -222,7 +222,7 @@
 		"robust-saves": {
 			"type": "bool",
 			"name": "Robust saves",
-			"description": "Before a save is used, it is also tested with you slightly ahead of and behind your real position (about half a tick). Saves that only work at the exact spot are swapped for a nearby delay that survives all three, if there is one. v2.90: the same test now also decides whether an input is 'safe as it is' - before, a click that only survived at the exact predicted spot was passed through as safe and then killed you for real. If your click only works at the exact spot the search runs; if no delay holds up better than your click, the click still goes through untouched. Costs a few extra predictions per click, not per normal click when nothing is borderline.",
+			"description": "Before a save is used, it is also tested with you slightly ahead of and behind your real position (about half a tick). Saves that only work at the exact spot are swapped for a nearby delay that survives all three, if there is one. v2.90: the same test now also decides whether an input is 'safe as it is' - before, a click that only survived at the exact predicted spot was passed through as safe and then killed you for real. If your click only works at the exact spot the search runs. v2.95: when that save is not perfectly robust either it is used (logged as '(fragile)') instead of handing the click the prediction already knows dies for real back to the game - that was the 'nothing beats my click' pass-through. Costs a few extra predictions per click, not per normal click when nothing is borderline.",
 			"default": true
 		},
 		"ignore-touching-hazards": {
