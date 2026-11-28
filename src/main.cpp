@@ -1,4 +1,4 @@
-// Click Before Frames v3.1 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v3.2 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -2248,7 +2248,8 @@ namespace {
                 buf.orbWasGround = !nowUses && now < horizon;
             }
             // Learned timings are valid only for the specific first orb ahead.
-            if (targetOrb && learned > 0 && learned <= window) {
+            // v3.2: and never a learned delay that would land outside the orb you are clicking.
+            if (targetOrb && learned > 0 && learned <= window && (!retimingOrb || learned <= touch + st(8))) {
                 int ret = simulate(layer, p1, p2, dual, learned, true, horizon, releaseAfter, horizon, &end);
                 if (usesNearPress(learned) && ret >= horizon) {
                     *landed = ret;
@@ -2262,12 +2263,21 @@ namespace {
                 //    longest wins (earliest on a tie), instead of simply the first that hits
                 //    the orb: where in the orb you click changes where the orb sends you.
                 int bestRet = -1;
+                bool bestSafe = false;  // v3.2: a run that clears the look-ahead beats any longer death
                 int fallbackK = 0, fallbackRet = -1;
                 int runStart = -1, safeStart = -1, safeEnd = -1;
                 // v2.87: re-timing never uses the very last tick you are still touching the orb
                 // on - a prediction that is a fraction of a tick off would put the press outside
                 // the orb and the click would do nothing at all.
                 int endK = retimingOrb ? std::min(scanEnd, std::max(touch + 1, lastTouch)) : scanEnd;
+                // v3.2: a press that ALREADY fires the orb is a click you made on the orb - it gets
+                // nudged by at most 2 frames, never re-planned. A long "still touching" window (or
+                // the middle of a safe run) used to move such a press 10+ frames out, which delivered
+                // it long after the orb: "ORB timing +43t (10.75f)" on every click and the orb never
+                // fired. Nothing outside touch+2f is still your click.
+                if (retimingOrb) {
+                    endK = std::min(endK, touch + st(8));
+                }
                 for (int k = std::max(1, touch - 1); k <= endK; ++k) {
                     if (k > legacyAlignEnd && clickMs() > buf.budgetMs) {
                         break;
@@ -2334,14 +2344,23 @@ namespace {
                     if (!retimingOrb && !groundPress && now >= horizon && !fullOnly && ret < horizon) {
                         continue;
                     }
-                    if (ret > bestRet) {
+                    // v3.2: `ret` counts ticks from NOW, and a delayed run has delay+horizon ticks to
+                    // live in - so a run that never clears anything could report 295t and out-rank a
+                    // genuinely safe run at 252t. That is how a click on an orb got pushed 10 frames
+                    // out ("ORB timing +43t (10.75f)") and the orb never fired. A clearing run always
+                    // wins; among those the earliest, and only then the longest death.
+                    bool isSafe = ret >= horizon;
+                    if ((isSafe && !bestSafe) || (isSafe == bestSafe && ret > bestRet)) {
+                        bestSafe = isSafe;
                         bestRet = ret;
                         found = k;
                         *landed = ret;
                     }
                 }
                 if (safeStart >= 0) {
-                    found = (safeStart + safeEnd) / 2;
+                    // v3.2: a click that already fires the orb takes the EARLIEST tick that clears -
+                    // the middle of the safe window is not your click, it is 10 frames later.
+                    found = retimingOrb ? safeStart : (safeStart + safeEnd) / 2;
                     *landed = horizon;
                 }
                 if (retimingOrb && found > 0) {
@@ -4919,7 +4938,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v3.1 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v3.2 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {

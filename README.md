@@ -30,10 +30,10 @@ actually live, and the one that lives longest is what the game is then told to d
 
 Practice use only; do not use for verified or leaderboard runs. Auto-input features can act without an on-screen watermark.
 
-## Geometry Dash 2.2091 (Geode v6, v3.1)
+## Geometry Dash 2.2091 (Geode v6, v3.2)
 This build targets **Geometry Dash 2.2091** with **Geode 6.0.0 or newer**; it no longer loads on 2.2081. The 2.2091 port is a compatibility update, not a change of prediction rules - all v2.94 behaviour is the same.
 
-A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v3.1.0, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
+A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v3.2.0, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
 
 - 2.209 removed the replay path: `PlayLayer::init` is `(GJGameLevel*, bool dontCreateObjects)` now, so the level hook follows that signature.
 - Geode v6 dropped the `gd::` namespace (`gd::vector` is `std::vector`), and `Mod::getSaveDir()` returns an `asp::fs::Path`. Saved level memory, run-check recordings and `console-export.txt` still live in the same folder; the path is converted through its native form so Windows user names outside the ANSI codepage keep working.
@@ -186,3 +186,7 @@ The ghost copies the player's gravity and direction for both upright and upside-
 - v3.1: the orb you click is never skipped. A press that fires an orb is only delivered on a tick that still fires
   that same orb; if the delay the search picked would leave the orb behind, the press goes through as you made it.
   The log says `orb kept: ...` either way, so a held click that would have missed the orb is now visible.
+- v3.2: a click that already fires an orb is only nudged, never re-planned. The re-time was capped at
+  the whole "still touching the orb" window and could pick the middle of a safe run, so a click on an orb
+  could be delayed 10+ frames (`ORB timing +43t (10.75f)`) and the orb never fired. It is now limited to
+  2 frames after the click and takes the earliest tick that clears.
