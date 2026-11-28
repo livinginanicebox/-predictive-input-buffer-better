@@ -30,10 +30,10 @@ actually live, and the one that lives longest is what the game is then told to d
 
 Practice use only; do not use for verified or leaderboard runs. Auto-input features can act without an on-screen watermark.
 
-## Geometry Dash 2.2091 (Geode v6, v3.4)
+## Geometry Dash 2.2091 (Geode v6, v3.5)
 This build targets **Geometry Dash 2.2091** with **Geode 6.0.0 or newer**; it no longer loads on 2.2081. The 2.2091 port is a compatibility update, not a change of prediction rules - all v2.94 behaviour is the same.
 
-A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v3.4.0, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
+A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v3.5.0, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
 
 - 2.209 removed the replay path: `PlayLayer::init` is `(GJGameLevel*, bool dontCreateObjects)` now, so the level hook follows that signature.
 - Geode v6 dropped the `gd::` namespace (`gd::vector` is `std::vector`), and `Mod::getSaveDir()` returns an `asp::fs::Path`. Saved level memory, run-check recordings and `console-export.txt` still live in the same folder; the path is converted through its native form so Windows user names outside the ANSI codepage keep working.
@@ -204,3 +204,9 @@ The ghost copies the player's gravity and direction for both upright and upside-
   exactly on the macro's tick and the log says `MACRO +Nt: your click is Nt early, the macro clicks at tX`.
   A click that is already late cannot be moved back; it is applied immediately and the log says how late it was.
   No macro.txt = the mod behaves exactly as before.
+- v3.5: the macro timing reads real replay files. Put a `.gdr2` (GDShare / Echo / EclipseBot) in the mod's save
+  folder and it is parsed directly - inputs, player 2, platformer buttons, the replay's own framerate and the level
+  name all come out of the file, so nothing has to be converted to text. `macro.gdr2`, `macro.gdr` and `macro.txt`
+  are preferred if present; otherwise the first `.gdr2` in the folder is used, so dropping a file in just works.
+  A plain `tick,down` text macro still loads. The log says what was read: `macro: 1631 clicks from Grief.gdr2
+  (GDR2 v2, 240 fps, level "GRIEF doggie newest", via EclipseBot)`. Older GDR2 v1 (bit-packed) files are read too.

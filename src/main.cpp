@@ -1,4 +1,4 @@
-// Click Before Frames v3.4 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v3.5 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -513,43 +513,77 @@ namespace {
         buf.panelDirty = buf.panelOpen;
     }
 
-    // v3.4 macro timing: <mod save dir>/macro.txt, re-read on every level entry and with F7.
+    // v3.4 macro timing: a replay in the mod's save folder, re-read on every level entry and
+    // with F7. .gdr2 / .gdr replays are read directly; a plain "tick,down" text file still works.
     std::filesystem::path macroFilePath() {
-        return saveDirPath() / "macro.txt";
-    }
-
-    std::string macroFileLine() {
+        auto dir = saveDirPath();
         std::error_code ec;
-        std::string path = macroFilePath().string();
-        return std::filesystem::exists(macroFilePath(), ec) ? path : path + " (missing)";
+        for (char const* name : { "macro.gdr2", "macro.gdr", "macro.txt" }) {
+            if (std::filesystem::exists(dir / name, ec)) {
+                return dir / name;
+            }
+        }
+        // no macro.* - take the first replay in the folder, so a dropped file just works
+        std::vector<std::filesystem::path> found;
+        for (auto it = std::filesystem::directory_iterator(dir, ec); !ec && it != std::filesystem::directory_iterator(); ++it) {
+            std::string ext = it->path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (ext == ".gdr2" || ext == ".gdr") {
+                found.push_back(it->path());
+            }
+        }
+        std::sort(found.begin(), found.end());
+        return found.empty() ? dir / "macro.gdr2" : found.front();
     }
 
-    // Reads the macro and turns it into a list of clicks. With no macro.txt nothing changes:
+    // Reads the macro and turns it into a list of clicks. With no macro file nothing changes:
     // an empty list means the timings are predicted exactly as before.
     void loadMacro(bool announce) {
         auto path = macroFilePath();
         std::ifstream file(path, std::ios::binary);
         if (!file) {
             buf.macroClicks.clear();
-            buf.macroStatus = "no macro.txt";
+            buf.macroStatus = "no macro file";
             if (announce) {
-                say("macro: no macro.txt - put one in {}", path.string());
+                say("macro: no macro file - put a .gdr2 replay (or macro.txt) in {}", saveDirPath().string());
             }
             return;
         }
-        std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        std::string name = path.filename().string();
+        if (macro_policy::looksLikeGdr2(bytes)) {
+            auto replay = macro_policy::parseGdr2(bytes);
+            if (!replay.ok) {
+                buf.macroClicks.clear();
+                buf.macroStatus = fmt::format("{}: {}", name, replay.error);
+                say("macro: {} could not be read ({})", name, replay.error);
+                return;
+            }
+            buf.macroClicks = std::move(replay.clicks);
+            buf.macroFps = replay.framerate;
+            buf.macroStatus = fmt::format("{} GDR2 v{}, {} fps, {} clicks, last {:.1f}s{}", name, replay.version, replay.framerate,
+                buf.macroClicks.size(), buf.macroClicks.empty() ? 0.f : buf.macroClicks.back().tick * TICK,
+                replay.levelName.empty() ? std::string() : fmt::format(", level \"{}\"", replay.levelName));
+            say("macro: {} clicks from {} (GDR2 v{}, {} fps{}, {}{})", buf.macroClicks.size(), name, replay.version, replay.framerate,
+                replay.levelName.empty() ? "" : fmt::format(", level \"{}\"", replay.levelName),
+                replay.botName.empty() ? "" : fmt::format(" via {}", replay.botName), announce ? "" : " - F7 reloads it");
+            return;
+        }
+        // plain text: tick,down per line (+ optional player column)
+        std::string text(bytes.begin(), bytes.end());
         int lines = 0;
         int fps = std::clamp(buf.macroFps, 30, 1000);
         buf.macroClicks = macro_policy::parse(text, fps, &lines);
         if (buf.macroClicks.empty()) {
-            buf.macroStatus = fmt::format("no usable clicks in {} lines", lines);
+            buf.macroStatus = fmt::format("{}: no usable clicks", name);
             if (announce || buf.explain) {
-                say("macro: no usable clicks in macro.txt - one click per line, tick,down ({} fps, e.g. 1234,1)", fps);
+                say("macro: no usable clicks in {} - use a .gdr2 replay, or one tick,down per line ({} fps, e.g. 1234,1)", name, fps);
             }
             return;
         }
-        buf.macroStatus = fmt::format("{} clicks ({} fps, last t{})", buf.macroClicks.size(), fps, buf.macroClicks.back().tick);
-        say("macro: {} clicks loaded from macro.txt ({} fps -> 240 ticks/s, first t{}, last t{}){}", buf.macroClicks.size(), fps,
+        buf.macroStatus = fmt::format("{} text, {} fps, {} clicks, last {:.1f}s", name, fps, buf.macroClicks.size(),
+            buf.macroClicks.back().tick * TICK);
+        say("macro: {} clicks loaded from {} ({} fps -> 240 ticks/s, first t{}, last t{}){}", buf.macroClicks.size(), name, fps,
             buf.macroClicks.front().tick, buf.macroClicks.back().tick, announce ? "" : " - F7 reloads it");
     }
 
@@ -747,8 +781,7 @@ namespace {
             buf.predictMovers);
         text += fmt::format("debug: drift check {} | path view {} | perf log {} | death log {} | ignore touching {}\n", buf.driftCheck,
             buf.showPath, buf.perfLog, buf.deathLog, buf.ignoreTouching);
-        text += fmt::format("macro: timing {} (window {}t, {} fps) | {} | {}\n", buf.macroTiming, buf.macroWindow, buf.macroFps,
-            buf.macroStatus, macroFileLine());
+        text += fmt::format("macro: timing {} (window {}t) | {}\n", buf.macroTiming, buf.macroWindow, buf.macroStatus);
         text += fmt::format("explain inputs {} | low latency {} | cbf sync {}{}\n", buf.explain, buf.lowLatency, buf.cbfSync,
             Loader::get()->isModLoaded("syzzi.click_between_frames") ? " (CBF loaded)" : "");
         // v2.39: CBF Extrapolate only changes what's drawn (a hidden player run ahead to "now"),
@@ -5067,7 +5100,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v3.4 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v3.5 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {

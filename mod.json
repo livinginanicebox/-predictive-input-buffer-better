@@ -3,7 +3,7 @@
 	"gd": {
 		"win": "2.2091"
 	},
-	"version": "v3.4.0",
+	"version": "v3.5.0",
 	"id": "basu.input-buffer",
 	"name": "Click Before Frames",
 	"developer": "BASU",
@@ -412,7 +412,7 @@
 		"macro-timing": {
 			"type": "bool",
 			"name": "Macro timing",
-			"description": "Use a macro of the level you are playing as the timing, instead of only predicting it. Put the macro in the mod's save folder as macro.txt (Settings > mods > Open save folder). One click per line: `tick,down` (for example `1234,1` presses and `1240,0` lets go; a third column 2 = player 2). Times are in 'Macro fps' ticks. When your click is within 'Macro timing: window' ticks of one of the macro's clicks, it is delivered exactly on the macro's tick - that is the one thing a prediction cannot know and a macro can. No macro.txt = no effect.",
+			"description": "Use a macro of the level you are playing as the timing, instead of only predicting it. Drop the replay in the mod's save folder (Settings > mods > Open save folder) - .gdr2 files (GDShare / Echo / EclipseBot) are read directly, and macro.gdr2 / macro.gdr / macro.txt are preferred if they exist; otherwise the first .gdr2 in the folder is used. A plain text macro still works: one `tick,down` per line (for example `1234,1` presses and `1240,0` lets go; a third column 2 = player 2). Replay frames are converted from the file's own framerate. When your click is within 'Macro timing: window' ticks of one of the macro's clicks, it is delivered exactly on the macro's tick - that is the one thing a prediction cannot know and a macro can. No macro file = no effect.",
 			"default": true
 		},
 		"macro-window": {

@@ -4,7 +4,10 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <string>
+#include <utility>
+#include <vector>
 
 int main() {
     using namespace macro_policy;
@@ -109,6 +112,148 @@ int main() {
         assert(remaining(clicks, 0) == 3);
         assert(remaining(clicks, 200) == 2);
         assert(remaining(clicks, 301) == 0);
+    }
+
+
+    // --- .gdr2 replay reader ------------------------------------------------------
+    {
+        // builds a GDR2 v2 file: header, metadata, then (delta,down) inputs at `fps`
+        auto build = [](double fps, std::vector<std::pair<int, bool>> inputs, std::string levelName) {
+            std::vector<unsigned char> out;
+            auto varint = [&](unsigned long long v) {
+                do {
+                    unsigned char b = static_cast<unsigned char>(v & 0x7f);
+                    v >>= 7;
+                    if (v) {
+                        b |= 0x80;
+                    }
+                    out.push_back(b);
+                } while (v);
+            };
+            auto string = [&](std::string const& s) {
+                varint(s.size());
+                out.insert(out.end(), s.begin(), s.end());
+            };
+            auto be32 = [&](std::uint32_t bits) {
+                for (int s = 24; s >= 0; s -= 8) out.push_back(static_cast<unsigned char>((bits >> s) & 0xff));
+            };
+            auto be64 = [&](std::uint64_t bits) {
+                for (int s = 56; s >= 0; s -= 8) out.push_back(static_cast<unsigned char>((bits >> s) & 0xff));
+            };
+            out.push_back('G');
+            out.push_back('D');
+            out.push_back('R');
+            varint(2);
+            string("");      // input extensions
+            string("tester");  // author
+            string("");        // description
+            be32(0x3f800000u);  // duration 1.0 s
+            varint(22000);      // game version
+            std::uint64_t fpsBits = 0;
+            double f = fps;
+            std::memcpy(&fpsBits, &f, sizeof(fpsBits));
+            be64(fpsBits);
+            varint(0);   // seed
+            varint(0);   // coins
+            varint(0);   // ldm
+            varint(0);   // platformer
+            string("Bot");
+            varint(1);   // bot version
+            varint(4242);  // level id
+            string(levelName);
+            varint(0);   // replay extensions
+            varint(0);   // deaths
+            varint(inputs.size());
+            varint(inputs.size());  // all player 1
+            for (auto const& [delta, down] : inputs) {
+                varint((static_cast<unsigned long long>(delta) << 1) | (down ? 1u : 0u));
+            }
+            return out;
+        };
+
+        auto data = build(240.0, { { 100, true }, { 40, false }, { 0, true } }, "Test Level");
+        assert(looksLikeGdr2(data));
+        auto replay = parseGdr2(data);
+        assert(replay.ok);
+        assert(replay.version == 2);
+        assert(replay.framerate == 240);
+        assert(replay.levelName == "Test Level");
+        assert(replay.author == "tester");
+        assert(replay.botName == "Bot");
+        assert(replay.clicks.size() == 3);
+        assert(replay.clicks[0].tick == 100 && replay.clicks[0].down && replay.clicks[0].player1);
+        assert(replay.clicks[1].tick == 140 && !replay.clicks[1].down);
+        assert(replay.clicks[2].tick == 140 && replay.clicks[2].down);
+
+        // a 60 fps replay is converted to the game's 240 ticks/s
+        auto slow = parseGdr2(build(60.0, { { 10, true }, { 5, false } }, "Slow"));
+        assert(slow.ok && slow.framerate == 60);
+        assert(slow.clicks.size() == 2);
+        assert(slow.clicks[0].tick == 40 && slow.clicks[0].down);
+        assert(slow.clicks[1].tick == 60 && !slow.clicks[1].down);
+
+        // truncated file -> error, not a crash
+        auto cut = data;
+        cut.resize(cut.size() - 2);
+        auto broken = parseGdr2(cut);
+        assert(!broken.ok && !broken.error.empty());
+
+        // a text file is not a replay
+        std::vector<unsigned char> text { 'h', 'i', '\n' };
+        assert(!looksLikeGdr2(text));
+        assert(!parseGdr2(text).ok);
+    }
+
+    // --- .gdr2 version 1 (bit-packed inputs, NUL-terminated text) ------------------
+    {
+        std::vector<unsigned char> out;
+        auto varint = [&](unsigned long long v) {
+            do {
+                unsigned char b = static_cast<unsigned char>(v & 0x7f);
+                v >>= 7;
+                if (v) {
+                    b |= 0x80;
+                }
+                out.push_back(b);
+            } while (v);
+        };
+        auto cstring = [&](std::string const& s) {
+            out.insert(out.end(), s.begin(), s.end());
+            out.push_back(0);
+        };
+        out.push_back('G');
+        out.push_back('D');
+        out.push_back('R');
+        varint(1);            // version
+        cstring("");          // input tag
+        cstring("old");       // author
+        cstring("");          // description
+        varint(1000);         // duration in frames
+        varint(22000);        // game version
+        varint(240);          // framerate
+        varint(0);            // seed
+        varint(0);            // coins
+        varint(0);            // ldm
+        varint(0);            // platformer
+        cstring("OldBot");
+        varint(1);            // bot version
+        varint(7);            // level id
+        cstring("V1 Level");
+        varint(0);            // replay extensions
+        varint(0);            // deaths
+        varint(2);            // inputs
+        varint(2);            // all player 1
+        out.push_back(static_cast<unsigned char>((5 << 2) | 0x02));   // delta 5, down
+        out.push_back(static_cast<unsigned char>((10 << 2)));         // delta 10, up
+
+        auto replay = parseGdr2(out);
+        assert(replay.ok);
+        assert(replay.version == 1);
+        assert(replay.levelName == "V1 Level");
+        assert(replay.botName == "OldBot");
+        assert(replay.clicks.size() == 2);
+        assert(replay.clicks[0].tick == 5 && replay.clicks[0].down);
+        assert(replay.clicks[1].tick == 15 && !replay.clicks[1].down);
     }
 
     std::printf("macro_policy tests passed\n");

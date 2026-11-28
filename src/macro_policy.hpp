@@ -19,7 +19,10 @@
 #include <climits>
 #include <cmath>
 #include <cstdlib>
+#include <cstdint>
+#include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace macro_policy {
@@ -141,6 +144,311 @@ namespace macro_policy {
             }
         }
         return best;
+    }
+
+
+    // ---------------------------------------------------------------------------------------
+    // .gdr2 replays (GDR2, what GDShare / Echo / EclipseBot write).
+    //
+    // Layout (all integers unsigned LEB128, floats big-endian):
+    //   "GDR" varint(version)  string(inputTag)
+    //   string(author) string(description) f32(durationSeconds) varint(gameVersion)
+    //   f64(framerate) varint(seed) varint(coins) bool(ldm) bool(platformer)
+    //   string(botName) varint(botVersion) varint(levelId) string(levelName)
+    //   varint(extensionSize) skip(extensionSize)
+    //   varint(deathCount) varint(delta)*
+    //   varint(inputCount) varint(player1Count)
+    //   player1 inputs, then player2 inputs, each: varint(delta<<1 | down)
+    //   (platformer: varint(delta<<3 | button<<1 | down), plus a varint extension size when
+    //    inputTag is not empty; version 1 files are bit-packed instead - both are read)
+    // Frames are counted at the replay's framerate, which is converted to the game's 240 ticks/s.
+    // ---------------------------------------------------------------------------------------
+    struct Replay {
+        std::vector<Click> clicks;
+        int framerate = 240;
+        int version = 0;
+        std::string levelName;
+        std::string author;
+        std::string botName;
+        std::string description;
+        std::string error;
+        bool ok = false;
+    };
+
+    inline bool looksLikeGdr2(std::vector<unsigned char> const& data) {
+        return data.size() >= 4 && data[0] == 'G' && data[1] == 'D' && data[2] == 'R';
+    }
+
+    class Gdr2Reader {
+    public:
+        explicit Gdr2Reader(std::vector<unsigned char> const& data) : data_(data) {}
+
+        bool failed = false;
+        std::string error;
+        size_t pos = 0;
+
+        bool done() const {
+            return failed || pos >= data_.size();
+        }
+
+        size_t remaining() const {
+            return pos < data_.size() ? data_.size() - pos : 0;
+        }
+
+        void fail(std::string why) {
+            if (!failed) {
+                failed = true;
+                error = std::move(why);
+            }
+        }
+
+        unsigned char byte() {
+            if (done() || pos >= data_.size()) {
+                fail("unexpected end of file");
+                return 0;
+            }
+            return data_[pos++];
+        }
+
+        std::uint64_t varint() {
+            std::uint64_t value = 0;
+            for (unsigned shift = 0; shift < 64; shift += 7) {
+                unsigned char b = byte();
+                if (failed) {
+                    return 0;
+                }
+                value |= static_cast<std::uint64_t>(b & 0x7f) << shift;
+                if ((b & 0x80) == 0) {
+                    return value;
+                }
+            }
+            fail("varint is too long");
+            return 0;
+        }
+
+        std::uint64_t count(std::uint64_t limit, char const* what) {
+            std::uint64_t value = varint();
+            if (!failed && value > limit) {
+                fail(std::string(what) + " is unreasonable");
+            }
+            return failed ? 0 : value;
+        }
+
+        bool boolean() {
+            return varint() != 0;
+        }
+
+        std::string string() {
+            std::uint64_t length = count(static_cast<std::uint64_t>(remaining()), "string length");
+            if (failed) {
+                return {};
+            }
+            std::string text(reinterpret_cast<char const*>(data_.data() + pos), static_cast<size_t>(length));
+            pos += static_cast<size_t>(length);
+            return text;
+        }
+
+        std::string cstring() {
+            size_t start = pos;
+            for (;;) {
+                if (byte() == 0 || failed) {
+                    break;
+                }
+                if (pos - start > 4096) {
+                    fail("text field is too long");
+                    break;
+                }
+            }
+            if (failed) {
+                return {};
+            }
+            return std::string(reinterpret_cast<char const*>(data_.data() + start), pos - start - 1);
+        }
+
+        float f32() {
+            std::uint32_t bits = 0;
+            for (int i = 0; i < 4; ++i) {
+                bits = (bits << 8) | byte();
+            }
+            float value = 0.f;
+            if (!failed) {
+                std::memcpy(&value, &bits, sizeof(value));
+            }
+            return value;
+        }
+
+        double f64() {
+            std::uint64_t bits = 0;
+            for (int i = 0; i < 8; ++i) {
+                bits = (bits << 8) | byte();
+            }
+            double value = 0.0;
+            if (!failed) {
+                std::memcpy(&value, &bits, sizeof(value));
+            }
+            return value;
+        }
+
+        void skip(std::uint64_t amount) {
+            if (amount > remaining()) {
+                fail("unexpected end of file");
+                return;
+            }
+            pos += static_cast<size_t>(amount);
+        }
+
+    private:
+        std::vector<unsigned char> const& data_;
+    };
+
+    // Reads one replay's inputs at the given framerate into 240 ticks/s clicks.
+    inline void gdr2Inputs(Gdr2Reader& r, std::uint64_t count, bool player2, bool platformer, bool extensions, bool v1,
+        int framerate, std::vector<Click>& out) {
+        std::uint64_t frame = 0;
+        for (std::uint64_t i = 0; i < count && !r.failed; ++i) {
+            std::uint64_t delta = 0;
+            bool down = false;
+            bool jump = true;
+            if (v1) {
+                unsigned char first = r.byte();
+                down = (first & 0x02) != 0;
+                bool more = (first & 0x01) != 0;
+                if (platformer) {
+                    unsigned button = (first >> 2) & 0x3;
+                    jump = button == 1;
+                    delta = first >> 4;
+                }
+                else {
+                    delta = first >> 2;
+                }
+                if (more) {
+                    delta |= r.varint() << (platformer ? 4 : 6);
+                }
+            }
+            else {
+                std::uint64_t packed = r.varint();
+                down = (packed & 1) != 0;
+                if (platformer) {
+                    jump = ((packed >> 1) & 0x3) == 1;
+                    delta = packed >> 3;
+                }
+                else {
+                    delta = packed >> 1;
+                }
+                if (extensions) {
+                    r.skip(r.varint());
+                }
+            }
+            if (r.failed) {
+                return;
+            }
+            frame += delta;
+            if (!jump) {
+                continue;
+            }
+            double ticks = framerate > 0 ? static_cast<double>(frame) * 240.0 / static_cast<double>(framerate) : double(frame);
+            out.push_back(Click { static_cast<int>(std::llround(ticks)), down, !player2 });
+        }
+    }
+
+    inline Replay parseGdr2(std::vector<unsigned char> const& data) {
+        Replay replay;
+        if (!looksLikeGdr2(data)) {
+            replay.error = "not a .gdr2 replay (no GDR signature)";
+            return replay;
+        }
+        Gdr2Reader r(data);
+        r.pos = 3;
+        std::uint64_t version = r.varint();
+        replay.version = static_cast<int>(version);
+        if (version == 0 || version > 2) {
+            replay.error = "unsupported .gdr2 version " + std::to_string(version);
+            return replay;
+        }
+        bool v1 = version == 1;
+        if (v1) {
+            std::string tag = r.cstring();
+            if (!tag.empty()) {
+                replay.error = "this .gdr2 uses input extensions that are not supported";
+                return replay;
+            }
+            replay.author = r.cstring();
+            replay.description = r.cstring();
+            r.varint();  // duration in frames
+            r.varint();  // game version
+            replay.framerate = static_cast<int>(r.count(1000000, "framerate"));
+            r.varint();  // seed
+            r.varint();  // coins
+            r.boolean();  // ldm
+            bool platformer = r.boolean();
+            replay.botName = r.cstring();
+            r.varint();  // bot version
+            r.varint();  // level id
+            replay.levelName = r.cstring();
+            r.skip(r.varint());  // replay extensions
+            std::uint64_t deaths = r.count(1000000, "death count");
+            for (std::uint64_t i = 0; i < deaths && !r.failed; ++i) {
+                r.varint();
+            }
+            std::uint64_t inputs = r.count(4000000, "input count");
+            std::uint64_t player1 = r.count(inputs, "player 1 input count");
+            if (r.failed) {
+                replay.error = r.error;
+                return replay;
+            }
+            gdr2Inputs(r, player1, false, platformer, false, true, replay.framerate, replay.clicks);
+            gdr2Inputs(r, inputs - player1, true, platformer, false, true, replay.framerate, replay.clicks);
+        }
+        else {
+            std::string tag = r.string();
+            bool extensions = !tag.empty();
+            replay.author = r.string();
+            replay.description = r.string();
+            r.f32();  // duration in seconds
+            r.varint();  // game version
+            double framerate = r.f64();
+            r.varint();  // seed
+            r.varint();  // coins
+            r.boolean();  // ldm
+            bool platformer = r.boolean();
+            replay.botName = r.string();
+            r.varint();  // bot version
+            r.varint();  // level id
+            replay.levelName = r.string();
+            r.skip(r.varint());  // replay extensions
+            if (r.failed) {
+                replay.error = r.error;
+                return replay;
+            }
+            if (!(framerate > 0.0 && framerate < 1000000.0)) {
+                replay.error = "replay has no valid framerate";
+                return replay;
+            }
+            replay.framerate = static_cast<int>(std::llround(framerate));
+            if (replay.framerate <= 0) {
+                replay.error = "replay framerate rounds to zero";
+                return replay;
+            }
+            std::uint64_t deaths = r.count(1000000, "death count");
+            for (std::uint64_t i = 0; i < deaths && !r.failed; ++i) {
+                r.varint();
+            }
+            std::uint64_t inputs = r.count(4000000, "input count");
+            std::uint64_t player1 = r.count(inputs, "player 1 input count");
+            if (r.failed) {
+                replay.error = r.error;
+                return replay;
+            }
+            gdr2Inputs(r, player1, false, platformer, extensions, false, replay.framerate, replay.clicks);
+            gdr2Inputs(r, inputs - player1, true, platformer, extensions, false, replay.framerate, replay.clicks);
+        }
+        if (r.failed) {
+            replay.error = r.error;
+            return replay;
+        }
+        std::stable_sort(replay.clicks.begin(), replay.clicks.end(), [](Click const& a, Click const& b) { return a.tick < b.tick; });
+        replay.ok = true;
+        return replay;
     }
 
     // How many clicks the macro has after `tick` (used for the load/status log line).
