@@ -3864,35 +3864,6 @@ namespace {
             releaseAfter = anyRobot ? robotHold.pick(st(20), 50) : holdEstimate();
         }
 
-        // v3.4 macro timing. A prediction can only guess where the click belongs; a macro of the
-        // level knows. When an uploaded macro has a click of the same direction within the window,
-        // your click is delivered exactly on the macro's tick instead of being searched for.
-        if (buf.macroTiming && !buf.macroClicks.empty() && buf.queue.empty()) {
-            int cur = levelTick(layer);
-            int window = st(std::clamp(buf.macroWindow, 1, 240));
-            int target = macro_policy::nearest(buf.macroClicks, cur, down, isPlayer1, window);
-            if (target != INT_MIN) {
-                int k = target - cur;
-                if (k > 0 && k <= maxDelay) {
-                    say("MACRO +{}t ({:g}f): your {} is {}t early, the macro {}s at t{}", k, k * TICK, down ? "click" : "release", k,
-                        down ? "click" : "release", target);
-                    decided(layer, p1, p2, dual, k, down, horizon, releaseAfter);
-                    buf.shift = k;
-                    queueInput(k - early, down);
-                    return true;
-                }
-                if (k == 0) {
-                    if (buf.explain) {
-                        say("macro: on the macro's tick (t{})", target);
-                    }
-                }
-                else if (buf.explain) {
-                    say("macro: your {} is {}t late for this spot (the macro {}s at t{}) - applied now", down ? "click" : "release", -k,
-                        down ? "click" : "release", target);
-                }
-            }
-        }
-
         // On the ground a press is a jump. v2.93: if that jump is a death, the press is moved into
         // an orb ahead instead (alignOrb decides); "also from the ground" forces it even when the
         // jump is fine.
