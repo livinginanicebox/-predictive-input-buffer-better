@@ -1,4 +1,4 @@
-// Click Before Frames v3.5 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v3.5.1 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -561,12 +561,22 @@ namespace {
             }
             buf.macroClicks = std::move(replay.clicks);
             buf.macroFps = replay.framerate;
-            buf.macroStatus = fmt::format("{} GDR2 v{}, {} fps, {} clicks, last {:.1f}s{}", name, replay.version, replay.framerate,
-                buf.macroClicks.size(), buf.macroClicks.empty() ? 0.f : buf.macroClicks.back().tick * TICK,
+            // v3.5.1: say exactly how much of the file was read, so a short read is never silent.
+            std::string inputs = replay.skippedInputs
+                ? fmt::format("{} inputs: {} jump, {} left/right", replay.readInputs, buf.macroClicks.size(), replay.skippedInputs)
+                : fmt::format("{} inputs", replay.readInputs);
+            if (replay.declaredInputs != replay.readInputs) {
+                inputs += fmt::format(" (header said {})", replay.declaredInputs);
+            }
+            if (!replay.consumedAll) {
+                inputs += " - stopped at an unreadable stretch";
+            }
+            buf.macroStatus = fmt::format("{} GDR2 v{}, {} fps, {}, last {:.1f}s{}", name, replay.version, replay.framerate, inputs,
+                buf.macroClicks.empty() ? 0.f : buf.macroClicks.back().tick * TICK,
                 replay.levelName.empty() ? std::string() : fmt::format(", level \"{}\"", replay.levelName));
-            say("macro: {} clicks from {} (GDR2 v{}, {} fps{}, {}{})", buf.macroClicks.size(), name, replay.version, replay.framerate,
+            say("macro: {} clicks from {} (GDR2 v{}, {} fps, {}{}{})", buf.macroClicks.size(), name, replay.version, replay.framerate, inputs,
                 replay.levelName.empty() ? "" : fmt::format(", level \"{}\"", replay.levelName),
-                replay.botName.empty() ? "" : fmt::format(" via {}", replay.botName), announce ? "" : " - F7 reloads it");
+                replay.botName.empty() ? "" : fmt::format(" via {}", replay.botName));
             return;
         }
         // plain text: tick,down per line (+ optional player column)
@@ -5100,7 +5110,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v3.5 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v3.5.1 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {

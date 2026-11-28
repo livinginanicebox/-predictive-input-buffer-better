@@ -192,11 +192,32 @@ int main() {
         assert(slow.clicks[0].tick == 40 && slow.clicks[0].down);
         assert(slow.clicks[1].tick == 60 && !slow.clicks[1].down);
 
-        // truncated file -> error, not a crash
+        // every input is read even when the file's own count is wrong: rewrite the count as 2
+        auto miscounted = data;
+        // the input count sits right after the death count; find it by searching for the
+        // (inputCount, p1Count) pair written as single bytes 3,3 and replace with 2,2
+        for (size_t i = 0; i + 1 < miscounted.size(); ++i) {
+            if (miscounted[i] == 3 && miscounted[i + 1] == 3) {
+                miscounted[i] = 2;
+                miscounted[i + 1] = 2;
+                break;
+            }
+        }
+        auto recovered = parseGdr2(miscounted);
+        assert(recovered.ok);
+        assert(recovered.declaredInputs == 2);
+        assert(recovered.readInputs == 3);      // read to the end of the input block
+        assert(recovered.clicks.size() == 3);
+        for (auto const& click : recovered.clicks) {
+            assert(click.player1);              // a wrong header can never make the file player 2
+        }
+        assert(recovered.clicks[2].tick == replay.clicks[2].tick);  // same timing as the good read
+
+        // truncated file -> fewer clicks or a clean error, never a crash
         auto cut = data;
         cut.resize(cut.size() - 2);
         auto broken = parseGdr2(cut);
-        assert(!broken.ok && !broken.error.empty());
+        assert(!broken.ok || broken.clicks.size() < 3);
 
         // a text file is not a replay
         std::vector<unsigned char> text { 'h', 'i', '\n' };

@@ -173,6 +173,10 @@ namespace macro_policy {
         std::string description;
         std::string error;
         bool ok = false;
+        bool consumedAll = false;        // the parse used the whole file
+        std::uint64_t declaredInputs = 0;  // inputs the file says it has
+        std::uint64_t readInputs = 0;      // inputs actually read
+        std::uint64_t skippedInputs = 0;   // left/right platformer inputs (not jump)
     };
 
     inline bool looksLikeGdr2(std::vector<unsigned char> const& data) {
@@ -301,11 +305,16 @@ namespace macro_policy {
         std::vector<unsigned char> const& data_;
     };
 
-    // Reads one replay's inputs at the given framerate into 240 ticks/s clicks.
-    inline void gdr2Inputs(Gdr2Reader& r, std::uint64_t count, bool player2, bool platformer, bool extensions, bool v1,
-        int framerate, std::vector<Click>& out) {
+    // Reads the input block into 240 ticks/s clicks. The reference reader (GDReplayFormat)
+    // reads inputs until the end of the file and uses the declared player-1 count only to know
+    // where the player 2 list starts - a wrong count in the file must not cost you the clicks,
+    // which is exactly what happened when this trusted the declared count instead.
+    inline void gdr2Inputs(Gdr2Reader& r, std::uint64_t player1Remaining, bool platformer, bool extensions, bool v1,
+        int framerate, std::vector<Click>& out, std::uint64_t* totalIn = nullptr, std::uint64_t* skipped = nullptr) {
         std::uint64_t frame = 0;
-        for (std::uint64_t i = 0; i < count && !r.failed; ++i) {
+        std::uint64_t read = 0;
+        while (!r.failed && r.remaining() > 0 && read < 4000000) {
+            size_t before = r.pos;
             std::uint64_t delta = 0;
             bool down = false;
             bool jump = true;
@@ -336,22 +345,40 @@ namespace macro_policy {
                     delta = packed >> 1;
                 }
                 if (extensions) {
-                    r.skip(r.varint());
+                    std::uint64_t size = r.varint();
+                    r.skip(size);
                 }
             }
-            if (r.failed) {
-                return;
+            if (r.failed || r.pos <= before) {
+                break;
+            }
+            ++read;
+            bool player2 = player1Remaining == 0;
+            bool lastPlayer1 = false;
+            if (player1Remaining > 0) {
+                --player1Remaining;
+                lastPlayer1 = player1Remaining == 0;
             }
             frame += delta;
-            if (!jump) {
-                continue;
+            if (jump) {
+                double ticks = framerate > 0 ? static_cast<double>(frame) * 240.0 / static_cast<double>(framerate) : double(frame);
+                out.push_back(Click { static_cast<int>(std::llround(ticks)), down, !player2 });
             }
-            double ticks = framerate > 0 ? static_cast<double>(frame) * 240.0 / static_cast<double>(framerate) : double(frame);
-            out.push_back(Click { static_cast<int>(std::llround(ticks)), down, !player2 });
+            else if (skipped) {
+                ++*skipped;
+            }
+            if (lastPlayer1) {
+                frame = 0;  // the player 2 list starts at frame 0
+            }
+        }
+        if (totalIn) {
+            *totalIn = read;
         }
     }
 
-    inline Replay parseGdr2(std::vector<unsigned char> const& data) {
+    // One reading of the file. `durationIsDouble` and `forceV2` cover the variants seen in the
+    // wild (a writer using a 64-bit duration, or a file claiming version 1 with the v2 layout).
+    inline Replay parseGdr2Layout(std::vector<unsigned char> const& data, bool durationIsDouble, bool forceV2) {
         Replay replay;
         if (!looksLikeGdr2(data)) {
             replay.error = "not a .gdr2 replay (no GDR signature)";
@@ -365,7 +392,11 @@ namespace macro_policy {
             replay.error = "unsupported .gdr2 version " + std::to_string(version);
             return replay;
         }
-        bool v1 = version == 1;
+        bool v1 = version == 1 && !forceV2;
+        bool platformer = false;
+        bool inputExtensions = false;
+        std::uint64_t declared = 0;
+        std::uint64_t player1 = 0;
         if (v1) {
             std::string tag = r.cstring();
             if (!tag.empty()) {
@@ -380,37 +411,30 @@ namespace macro_policy {
             r.varint();  // seed
             r.varint();  // coins
             r.boolean();  // ldm
-            bool platformer = r.boolean();
+            platformer = r.boolean();
             replay.botName = r.cstring();
             r.varint();  // bot version
             r.varint();  // level id
             replay.levelName = r.cstring();
             r.skip(r.varint());  // replay extensions
-            std::uint64_t deaths = r.count(1000000, "death count");
-            for (std::uint64_t i = 0; i < deaths && !r.failed; ++i) {
-                r.varint();
-            }
-            std::uint64_t inputs = r.count(4000000, "input count");
-            std::uint64_t player1 = r.count(inputs, "player 1 input count");
-            if (r.failed) {
-                replay.error = r.error;
-                return replay;
-            }
-            gdr2Inputs(r, player1, false, platformer, false, true, replay.framerate, replay.clicks);
-            gdr2Inputs(r, inputs - player1, true, platformer, false, true, replay.framerate, replay.clicks);
         }
         else {
             std::string tag = r.string();
-            bool extensions = !tag.empty();
+            inputExtensions = !tag.empty();
             replay.author = r.string();
             replay.description = r.string();
-            r.f32();  // duration in seconds
+            if (durationIsDouble) {
+                r.f64();
+            }
+            else {
+                r.f32();
+            }
             r.varint();  // game version
             double framerate = r.f64();
             r.varint();  // seed
             r.varint();  // coins
             r.boolean();  // ldm
-            bool platformer = r.boolean();
+            platformer = r.boolean();
             replay.botName = r.string();
             r.varint();  // bot version
             r.varint();  // level id
@@ -429,26 +453,91 @@ namespace macro_policy {
                 replay.error = "replay framerate rounds to zero";
                 return replay;
             }
-            std::uint64_t deaths = r.count(1000000, "death count");
-            for (std::uint64_t i = 0; i < deaths && !r.failed; ++i) {
-                r.varint();
-            }
-            std::uint64_t inputs = r.count(4000000, "input count");
-            std::uint64_t player1 = r.count(inputs, "player 1 input count");
-            if (r.failed) {
-                replay.error = r.error;
-                return replay;
-            }
-            gdr2Inputs(r, player1, false, platformer, extensions, false, replay.framerate, replay.clicks);
-            gdr2Inputs(r, inputs - player1, true, platformer, extensions, false, replay.framerate, replay.clicks);
         }
         if (r.failed) {
             replay.error = r.error;
             return replay;
         }
+        // deaths
+        std::uint64_t deaths = r.count(1000000, "death count");
+        for (std::uint64_t i = 0; i < deaths && !r.failed; ++i) {
+            r.varint();
+        }
+        declared = r.count(4000000, "input count");
+        std::uint64_t player1Count = r.count(4000000, "player 1 input count");
+        // The input list itself is the truth (it is read to the end of the file); the header counts
+        // only decide where the player-2 list starts, and are ignored when they contradict each
+        // other so a bad header can never turn the whole replay into player-2 clicks.
+        if (declared > 0 && player1Count > 0 && player1Count <= declared) {
+            player1 = player1Count;
+        }
+        else if (declared > 0) {
+            player1 = declared;
+        }
+        else {
+            player1 = 4000000;
+        }
+        if (r.failed) {
+            replay.error = r.error;
+            return replay;
+        }
+        replay.declaredInputs = declared;
+        std::size_t inputStart = r.pos;
+        gdr2Inputs(r, player1, platformer, inputExtensions, v1, replay.framerate, replay.clicks, &replay.readInputs, &replay.skippedInputs);
+        if (r.failed) {
+            replay.error = r.error;
+            return replay;
+        }
+        if ((replay.readInputs != declared || r.remaining() != 0) && inputStart < data.size()) {
+            // The header disagrees with the file, so its player-1/player-2 split cannot be trusted:
+            // read the list once more as a single player's, which keeps every click yours.
+            std::vector<Click> plain;
+            std::uint64_t plainRead = 0;
+            std::uint64_t plainSkipped = 0;
+            r.pos = inputStart;
+            r.failed = false;
+            gdr2Inputs(r, 4000000, platformer, inputExtensions, v1, replay.framerate, plain, &plainRead, &plainSkipped);
+            if (!r.failed && plain.size() >= replay.clicks.size()) {
+                replay.clicks = std::move(plain);
+                replay.readInputs = plainRead;
+                replay.skippedInputs = plainSkipped;
+            }
+        }
+        // Stable, because two inputs can share a frame and their order decides press vs release.
         std::stable_sort(replay.clicks.begin(), replay.clicks.end(), [](Click const& a, Click const& b) { return a.tick < b.tick; });
+        replay.consumedAll = r.remaining() == 0;
         replay.ok = true;
         return replay;
+    }
+
+    inline Replay parseGdr2(std::vector<unsigned char> const& data) {
+        auto score = [](Replay const& replay) {
+            if (!replay.ok) {
+                return -1LL;
+            }
+            long long score = 1000000 + static_cast<long long>(std::min<size_t>(replay.clicks.size(), 200000));
+            if (!replay.consumedAll) {
+                score -= 500000;  // a reading that stops mid-file is suspicious
+            }
+            if (replay.readInputs != replay.declaredInputs) {
+                score -= 1000;
+            }
+            return score;
+        };
+        Replay best = parseGdr2Layout(data, false, false);
+        if (score(best) < 1000000 + 100000) {
+            for (auto [isDouble, forceV2] : { std::pair<bool, bool> { true, false }, std::pair<bool, bool> { false, true },
+                     std::pair<bool, bool> { true, true } }) {
+                Replay alt = parseGdr2Layout(data, isDouble, forceV2);
+                if (score(alt) > score(best)) {
+                    best = std::move(alt);
+                }
+            }
+        }
+        if (!best.ok && best.error.empty()) {
+            best.error = "could not read the replay";
+        }
+        return best;
     }
 
     // How many clicks the macro has after `tick` (used for the load/status log line).

@@ -30,10 +30,10 @@ actually live, and the one that lives longest is what the game is then told to d
 
 Practice use only; do not use for verified or leaderboard runs. Auto-input features can act without an on-screen watermark.
 
-## Geometry Dash 2.2091 (Geode v6, v3.5)
+## Geometry Dash 2.2091 (Geode v6, v3.5.1)
 This build targets **Geometry Dash 2.2091** with **Geode 6.0.0 or newer**; it no longer loads on 2.2081. The 2.2091 port is a compatibility update, not a change of prediction rules - all v2.94 behaviour is the same.
 
-A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v3.5.0, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
+A ready-to-install binary is checked in at `package/basu.input-buffer.geode` (v3.5.1, built by the `build.yml` Windows job against Geode 6.0.0). Drop it into your Geode `mods` folder, or rebuild it yourself from source.
 
 - 2.209 removed the replay path: `PlayLayer::init` is `(GJGameLevel*, bool dontCreateObjects)` now, so the level hook follows that signature.
 - Geode v6 dropped the `gd::` namespace (`gd::vector` is `std::vector`), and `Mod::getSaveDir()` returns an `asp::fs::Path`. Saved level memory, run-check recordings and `console-export.txt` still live in the same folder; the path is converted through its native form so Windows user names outside the ANSI codepage keep working.
@@ -208,5 +208,14 @@ The ghost copies the player's gravity and direction for both upright and upside-
   folder and it is parsed directly - inputs, player 2, platformer buttons, the replay's own framerate and the level
   name all come out of the file, so nothing has to be converted to text. `macro.gdr2`, `macro.gdr` and `macro.txt`
   are preferred if present; otherwise the first `.gdr2` in the folder is used, so dropping a file in just works.
-  A plain `tick,down` text macro still loads. The log says what was read: `macro: 1631 clicks from Grief.gdr2
-  (GDR2 v2, 240 fps, level "GRIEF doggie newest", via EclipseBot)`. Older GDR2 v1 (bit-packed) files are read too.
+  A plain `tick,down` text macro still loads. The log says what was read: `macro: 1615 clicks from Grief.gdr2
+  (GDR2 v2, 240 fps, 1631 inputs, level "GRIEF doggie newest", via EclipseBot)`. Older GDR2 v1 (bit-packed) files
+  are read too.
+- v3.5.1 (fixes "only 2 clicks out of 282"): the input list is now read **to the end of the file**, the way the
+  reference reader does, instead of stopping at the count written in the file's header. The header counts are only
+  used to find where the player-2 list starts, and they are ignored when they contradict the file, so a bad header
+  can never shorten the macro or turn your clicks into player-2 clicks. The load line always states what was read:
+  `macro: 282 clicks from level.gdr2 (GDR2 v2, 240 fps, 282 inputs, ...)`, or `282 inputs: 2 jump, 280 left/right`
+  for a platformer replay, plus `(header said N)` and `stopped at an unreadable stretch` when the file disagrees
+  with itself. If the number in the log is smaller than what your file holds, the log says exactly why instead of
+  loading two clicks and going quiet.
