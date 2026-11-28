@@ -1,4 +1,4 @@
-// Click Before Frames v3.3 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v3.4 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -23,6 +23,7 @@
 #include "menu_shortcut.hpp"
 #include "bypass_policy.hpp"
 #include "survival_policy.hpp"
+#include "macro_policy.hpp"
 #include <Geode/Geode.hpp>
 #include <Geode/modify/CCCircleWave.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
@@ -52,6 +53,7 @@
 #include <filesystem>
 #include <functional>
 #include <fstream>
+#include <iterator>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -90,6 +92,54 @@ namespace {
     // user names outside the ANSI codepage working.
     std::filesystem::path saveDirPath() {
         return Mod::get()->getSaveDir().toStdPath().unwrapOrDefault();
+    }
+
+    // v3.4 macro timing: <mod save dir>/macro.txt, reloaded on every level entry and with F7.
+    std::filesystem::path macroFilePath() {
+        return saveDirPath() / "macro.txt";
+    }
+
+    std::string macroFileLine() {
+        std::error_code ec;
+        std::string path = macroFilePath().string();
+        return std::filesystem::exists(macroFilePath(), ec) ? path : path + " (missing)";
+    }
+
+    // Reads the macro and turns it into a list of clicks. Nothing else in the mod changes when
+    // there is no macro: an empty list means the timings are still predicted as before.
+    void loadMacro(bool announce) {
+        auto path = macroFilePath();
+        std::ifstream file(path, std::ios::binary);
+        if (!file) {
+            buf.macroClicks.clear();
+            buf.macroStatus = "no macro.txt";
+            if (announce) {
+                say("macro: no macro.txt - put one in {}", path.string());
+            }
+            return;
+        }
+        std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        int lines = 0;
+        int fps = std::clamp(buf.macroFps, 30, 1000);
+        buf.macroClicks = macro_policy::parse(text, fps, &lines);
+        if (buf.macroClicks.empty()) {
+            buf.macroStatus = fmt::format("no usable clicks in {} lines", lines);
+            if (announce || buf.explain) {
+                say("macro: {} has no usable clicks - one click per line, \"tick,down\" ({} fps, e.g. 1234,1)", path.filename().string(),
+                    fps);
+            }
+            return;
+        }
+        buf.macroStatus = fmt::format("{} clicks ({} fps, last t{})", buf.macroClicks.size(), fps, buf.macroClicks.back().tick);
+        say("macro: {} clicks loaded from macro.txt ({} fps -> 240 ticks/s, first t{}, last t{}){}", buf.macroClicks.size(), fps,
+            buf.macroClicks.front().tick, buf.macroClicks.back().tick, announce ? "" : " - F7 reloads it");
+    }
+
+    // Level time in the game's own 240 ticks/s, which is what a macro's times are relative to.
+    int levelTick(PlayLayer* layer) {
+        double time = layer ? layer->m_gameState.m_levelTime : 0.0;
+        int ticks = static_cast<int>(std::llround(time * 240.0));
+        return ticks > 0 ? ticks : tickCount;
     }
 
     constexpr uint64_t typeBit(GameObjectType type) {
@@ -209,7 +259,7 @@ namespace {
         bool perfMode = false;   // v2.71: performance mode
         double userBudget = 6.0; // v2.75: the budget from the settings (budgetMs is this click's)
         bool autoBudget = true;  // v2.75: budget follows the frame rate
-        int keys[5] = { 0, 0, 0, 0, 0 };  // stage, export, console, path, forget
+        int keys[6] = { 0, 0, 0, 0, 0, 0 };  // stage, export, console, path, forget, macro
         std::unordered_set<GameObject*> simDisabled;  // v2.75: objects a toggle orb switched off in this prediction
         std::deque<std::string> logLines;
 
@@ -289,6 +339,12 @@ namespace {
         bool autoRelease = false;    // v2.4: wave auto-release (practice mode only)
         int autoWindow = 6;          // v2.4: hold must die within this many ticks to auto-release
         bool autoReleased = false;   // v2.4: we released for you; your real release is swallowed
+        // v3.4 macro timing: timings uploaded from a macro of this level
+        bool macroTiming = true;     // use the macro's clicks instead of guessing (no macro = no effect)
+        int macroWindow = 24;        // how far off your click may be and still be moved onto the macro's tick
+        int macroFps = 240;          // the macro file's tick rate (60 fps macros are converted)
+        std::vector<macro_policy::Click> macroClicks;
+        std::string macroStatus = "not read";  // shown in the menu / status log
         bool autoReleaseToldNormal = false;  // v3.0: said why auto-release is silent in a normal run
         bool autoReleaseToldWeak = false;    // v3.0: said why letting go was not worth doing for you
         int spamGap = 16;            // v2.5.2: inputs closer than this (ticks) count toward wave spam
@@ -549,8 +605,8 @@ namespace {
         buf.budgetMs = mod->getSettingValue<double>("sim-budget-ms");
         buf.autoBudget = mod->getSettingValue<bool>("auto-budget");
         // v2.75 rebindable keys
-        char const* keyNames[] = { "key-stage", "key-export", "key-console", "key-path", "key-forget" };
-        for (int i = 0; i < 5; ++i) {
+        char const* keyNames[] = { "key-stage", "key-export", "key-console", "key-path", "key-forget", "key-macro" };
+        for (int i = 0; i < 6; ++i) {
             buf.keys[i] = parseKey(mod->getSettingValue<std::string>(keyNames[i]));
         }
         buf.practiceOnly = mod->getSettingValue<bool>("practice-only");
@@ -561,6 +617,10 @@ namespace {
         buf.orbClick = buf.assumeOrbs;
         buf.tryBothOrbs = mod->getSettingValue<bool>("orb-try-both");
         buf.avoidMovers = mod->getSettingValue<bool>("avoid-moving-objects");
+        // v3.4 macro timing
+        buf.macroTiming = mod->getSettingValue<bool>("macro-timing");
+        buf.macroWindow = static_cast<int>(mod->getSettingValue<int64_t>("macro-window"));
+        buf.macroFps = static_cast<int>(mod->getSettingValue<int64_t>("macro-fps"));
         buf.autoRelease = mod->getSettingValue<bool>("wave-auto-release");
         buf.autoWindow = static_cast<int>(mod->getSettingValue<int64_t>("auto-release-window"));
         buf.driftCheck = mod->getSettingValue<bool>("drift-check");
@@ -689,6 +749,8 @@ namespace {
             buf.predictMovers);
         text += fmt::format("debug: drift check {} | path view {} | perf log {} | death log {} | ignore touching {}\n", buf.driftCheck,
             buf.showPath, buf.perfLog, buf.deathLog, buf.ignoreTouching);
+        text += fmt::format("macro: timing {} (window {}t, {} fps) | {} | {}\n", buf.macroTiming, buf.macroWindow, buf.macroFps,
+            buf.macroStatus, macroFileLine());
         text += fmt::format("explain inputs {} | low latency {} | cbf sync {}{}\n", buf.explain, buf.lowLatency, buf.cbfSync,
             Loader::get()->isModLoaded("syzzi.click_between_frames") ? " (CBF loaded)" : "");
         // v2.39: CBF Extrapolate only changes what's drawn (a hidden player run ahead to "now"),
@@ -3802,6 +3864,35 @@ namespace {
             releaseAfter = anyRobot ? robotHold.pick(st(20), 50) : holdEstimate();
         }
 
+        // v3.4 macro timing. A prediction can only guess where the click belongs; a macro of the
+        // level knows. When an uploaded macro has a click of the same direction within the window,
+        // your click is delivered exactly on the macro's tick instead of being searched for.
+        if (buf.macroTiming && !buf.macroClicks.empty() && buf.queue.empty()) {
+            int cur = levelTick(layer);
+            int window = st(std::clamp(buf.macroWindow, 1, 240));
+            int target = macro_policy::nearest(buf.macroClicks, cur, down, isPlayer1, window);
+            if (target != INT_MIN) {
+                int k = target - cur;
+                if (k > 0 && k <= maxDelay) {
+                    say("MACRO +{}t ({:g}f): your {} is {}t early, the macro {}s at t{}", k, k * TICK, down ? "click" : "release", k,
+                        down ? "click" : "release", target);
+                    decided(layer, p1, p2, dual, k, down, horizon, releaseAfter);
+                    buf.shift = k;
+                    queueInput(k - early, down);
+                    return true;
+                }
+                if (k == 0) {
+                    if (buf.explain) {
+                        say("macro: on the macro's tick (t{})", target);
+                    }
+                }
+                else if (buf.explain) {
+                    say("macro: your {} is {}t late for this spot (the macro {}s at t{}) - applied now", down ? "click" : "release", -k,
+                        down ? "click" : "release", target);
+                }
+            }
+        }
+
         // On the ground a press is a jump. v2.93: if that jump is a death, the press is moved into
         // an orb ahead instead (alignOrb decides); "also from the ground" forces it even when the
         // jump is fine.
@@ -4932,6 +5023,8 @@ class $modify(BufEndLevelLayer, EndLevelLayer) {
 
 $on_mod(Loaded) {
     buf.console = Mod::get()->getSettingValue<bool>("debug-console");
+    buf.macroTiming = Mod::get()->getSettingValue<bool>("macro-timing");
+    loadMacro(true);
     // v2.85: the path view never turns itself on when the game starts. It is a per-session
     // debug view now: F10 (or the menu switch) turns it on, and a fresh GD starts with it off.
     buf.showPath = false;
@@ -4976,7 +5069,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v3.3 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v3.4 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -5069,6 +5162,7 @@ class $modify(BufPlayLayer, PlayLayer) {
         exportLines.clear();
         logClock = 0;
         loadMemory(level);
+        loadMacro(false);  // v3.4: every level entry picks up a new macro.txt
         if (statsKey != memoryKey) {
             statsKey = memoryKey;
             sessionStats = {};
@@ -5155,7 +5249,7 @@ class $modify(BufPlayLayer, PlayLayer) {
             buf.panelLines.push_back(line);
         }
 
-        auto* hint = CCLabelBMFont::create("F6 stage  F3 x4 menu  F8 copy log  F9 console  F10 path  F11 forget", "chatFont.fnt");
+        auto* hint = CCLabelBMFont::create("F6 stage  F3 x4 menu  F7 macro  F8 copy log  F9 console  F10 path  F11 forget", "chatFont.fnt");
         hint->setScale(0.45f);
         hint->setColor({ 160, 190, 255 });
         hint->setAnchorPoint({ 0.5f, 0.5f });
@@ -5577,6 +5671,9 @@ class $modify(BufKeyboard, CCKeyboardDispatcher) {
                 memoryDirty = true;
                 saveMemory();
                 say("memory for this level cleared");
+            }
+            else if (is(5)) {
+                loadMacro(true);
             }
             else if (is(3)) {
                 buf.showPath = !buf.showPath;

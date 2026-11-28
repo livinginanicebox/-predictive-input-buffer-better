@@ -3,7 +3,7 @@
 	"gd": {
 		"win": "2.2091"
 	},
-	"version": "v3.3.0",
+	"version": "v3.4.0",
 	"id": "basu.input-buffer",
 	"name": "Click Before Frames",
 	"developer": "BASU",
@@ -408,6 +408,34 @@
 			"name": "Key: forget this level",
 			"description": "F1-F12, a letter (A-Z) or a number (0-9). Empty or None = no key.",
 			"default": "F11"
+		},
+		"macro-timing": {
+			"type": "bool",
+			"name": "Macro timing",
+			"description": "Use a macro of the level you are playing as the timing, instead of only predicting it. Put the macro in the mod's save folder as macro.txt (Settings > mods > Open save folder). One click per line: `tick,down` (for example `1234,1` presses and `1240,0` lets go; a third column 2 = player 2). Times are in 'Macro fps' ticks. When your click is within 'Macro timing: window' ticks of one of the macro's clicks, it is delivered exactly on the macro's tick - that is the one thing a prediction cannot know and a macro can. No macro.txt = no effect.",
+			"default": true
+		},
+		"macro-window": {
+			"type": "int",
+			"name": "Macro timing: window (ticks)",
+			"description": "How far off your click may be from a macro click and still be moved onto it. 24 ticks = 6 frames. Bigger = more forgiving, but two macro clicks closer together than this are hard to tell apart.",
+			"default": 24,
+			"min": 1,
+			"max": 240
+		},
+		"macro-fps": {
+			"type": "int",
+			"name": "Macro fps (ticks per second)",
+			"description": "How many times per second the macro file counts time. 240 = the game's own ticks (default). Use 60 if the file stores 60 fps frames - it is converted automatically.",
+			"default": 240,
+			"min": 30,
+			"max": 1000
+		},
+		"key-macro": {
+			"type": "string",
+			"name": "Key: reload macro",
+			"description": "Reloads <save folder>/macro.txt and says how many clicks it found. F1-F12, a letter (A-Z) or a number (0-9). Empty or None = no key.",
+			"default": "F7"
 		}
 	},
 	"resources": {
