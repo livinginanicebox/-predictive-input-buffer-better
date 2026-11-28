@@ -1,4 +1,4 @@
-// Click Before Frames v3.0 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v3.1 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -362,6 +362,8 @@ namespace {
         int orbUsedTick = -1;        // v2.6: first tick the current run actually used an orb
         int runOrbs = 0;             // v2.90: orbs the ghost clicked for you in the last run (diagnostic)
         int lastOrbTick = -1;        // v2.82: last tick the current run was still inside an orb
+        GameObject* orbKeepOrb = nullptr;  // v3.1: the orb YOUR press fired - it is never skipped
+        int orbKeepLast = -1;        // v3.1: last tick that press run was still inside an orb
         bool driftCheck = false;     // v2.4: log how far the real player strays from the prediction
         std::vector<CCPoint>* recordPath = nullptr;  // v2.4: ghost1 positions of the current run
         bool showPath = false;       // v2.11: draw the predicted path (F10)
@@ -3451,6 +3453,30 @@ namespace {
         return true;
     }
 
+    // v3.1: never skip the orb you clicked. A press that fires an orb is only ever delivered on
+    // a tick that still fires that same orb; if the delay the search wants would leave the orb
+    // behind, the press goes through exactly as you made it (0 = deliver now).
+    int keepOrbDelay(PlayLayer* layer, PlayerObject* p1, PlayerObject* p2, bool dual, int k, int horizon, int releaseAfter) {
+        if (k <= 0 || !buf.orbKeepOrb) {
+            return k;
+        }
+        if (buf.orbKeepLast >= 0 && k > buf.orbKeepLast) {
+            k = std::max(1, buf.orbKeepLast);
+        }
+        SimEnd e;
+        simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &e);
+        if (buf.orbUsedTick < 0 || buf.usedOrb != buf.orbKeepOrb) {
+            if (buf.explain) {
+                say("orb kept: holding your press +{}t would miss the orb you clicked - your click goes through now", k);
+            }
+            return 0;
+        }
+        if (buf.explain) {
+            say("orb kept: your press +{}t still fires the orb you clicked", k);
+        }
+        return k;
+    }
+
     bool intercept(GJBaseGameLayer* self, bool down, bool isPlayer1) {
         clickStart = std::chrono::steady_clock::now();
         clickBudget();
@@ -3475,6 +3501,8 @@ namespace {
         buf.pickReleased = false;
         buf.sinceScan = std::max(12, buf.survivalStride);
         buf.realInput = down;
+        buf.orbKeepOrb = nullptr;
+        buf.orbKeepLast = -1;
         buf.shipStraight = false;
         if (buf.autoReleased) {
             // the game already let go for you: your real release has nothing left to do
@@ -3813,6 +3841,17 @@ namespace {
                                  : simulateOrbs(layer, p1, p2, dual, 0, down, horizon, releaseAfter, horizon, &end);
         buf.captureKiller = false;
         buf.trackMovers = false;
+        // v3.1: what your press does with orbs, read before the search overwrites it. If your
+        // click fires an orb, a delayed delivery must still fire THAT orb - holding the press
+        // until you have drifted out of the orb is what "it skips orbs I click" looks like.
+        buf.orbKeepOrb = nullptr;
+        if (buf.orbUsedTick >= 0 && buf.orbUsedTick <= st(2)) {
+            buf.orbKeepOrb = buf.usedOrb;        // your press fires an orb right now
+        }
+        else if (buf.firstOrbTick >= 0 && buf.firstOrbTick <= st(8)) {
+            buf.orbKeepOrb = buf.firstOrb;       // it reaches the orb a couple of frames later
+        }
+        buf.orbKeepLast = buf.lastOrbTick;
         const int baseOrbs = buf.runOrbs;      // v2.90: orbs the ghost clicked for you in that run
         const int baseHarmless = buf.runHarmless;  // v2.91: hazards it ignored as "you're touching it"
 
@@ -4164,6 +4203,15 @@ namespace {
         }
         if (robotPress) {
             releaseAfter = robotUsedHold;  // the path view / drift check show the hold that works
+        }
+        if (down) {
+            int kept = keepOrbDelay(layer, p1, p2, dual, saved, horizon, releaseAfter);
+            if (kept <= 0) {
+                decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
+                buf.appliedInput = down;
+                return false;
+            }
+            saved = kept;
         }
         noteSave(layer, saved);
         say("SAVED {}{} +{}t ({:g}f)  {}->{}  [max {}]{}", down ? "press" : "release", tickTag, saved, saved * TICK, base, landed, maxDelay,
@@ -4871,7 +4919,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v3.0 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v3.1 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
