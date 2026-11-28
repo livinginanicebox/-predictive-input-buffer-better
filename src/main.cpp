@@ -1,4 +1,4 @@
-// Click Before Frames v3.2 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
+// Click Before Frames v3.3 (Geometry Dash 2.2091 / Geode v6: cube-style wave, wave auto-release,
 // orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
@@ -2137,11 +2137,25 @@ namespace {
         // made safe", the shifted ghost is 0.6px away and may legitimately touch the orb a tick
         // earlier or later - what matters is that it survives, not which orb it used. Requiring the
         // same orb there made almost every click "fragile" and sent it down the re-time path.
+        // v3.3: an orb click is a TAP. Every orb run used to be scored with your usual hold
+        // (holdEstimate(), ~12 ticks), so a click that is fine read as a death - the ghost keeps
+        // the button down for 3 more frames and flies into the next thing - and it was moved.
+        // A moved orb click is a late orb click: "99% of the time the orb clicks too late".
+        const int orbTapRelease = releaseAfter > 0 ? std::max(1, st(2)) : -1;
+        auto orbScore = [&](int k) {
+            SimEnd e;
+            int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &e);
+            if (orbTapRelease > 0 && releaseAfter > orbTapRelease) {
+                SimEnd te;
+                int tapRet = simulate(layer, p1, p2, dual, k, true, horizon, orbTapRelease, horizon, &te);
+                ret = std::max(ret, tapRet);
+            }
+            return ret;
+        };
         auto holdsUp = [&](int k, int need, bool sameOrb = true) {
             for (float off : { orbShift, -orbShift }) {
                 buf.ghostShiftX = off;
-                SimEnd e;
-                int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &e);
+                int ret = orbScore(k);
                 bool ok = ret >= need && (!sameOrb || prediction_policy::sameOrb(targetOrb, buf.usedOrb));
                 buf.ghostShiftX = 0.f;
                 if (!ok) {
@@ -2165,6 +2179,19 @@ namespace {
             // 2. Pressing now already uses an orb (e.g. held into it).
             int now = simulate(layer, p1, p2, dual, 0, true, horizon, releaseAfter, horizon, &end);
             buf.orbNowRet = now;
+            bool tapSaved = false;
+            if (orbTapRelease > 0 && releaseAfter > orbTapRelease) {
+                SimEnd te;
+                int tapNow = simulate(layer, p1, p2, dual, 0, true, horizon, orbTapRelease, horizon, &te);
+                if (tapNow > now) {
+                    now = tapNow;
+                    tapSaved = true;
+                    buf.orbNowRet = now;
+                    if (buf.explain) {
+                        trace += fmt::format(" (tap {}t)", tapNow);
+                    }
+                }
+            }
             // v2.99: does this press fire the orb itself? If not, "press now" is not the bar to beat.
             // A tap that ends before the ring just leaves you falling, so the run that matters for
             // comparison is doing nothing at all - otherwise a phantom orb activation later in the
@@ -2216,6 +2243,10 @@ namespace {
                     }
                 }
                 if (!buf.orbTiming || nowSafe) {
+                    if (buf.explain && nowSafe) {
+                        say("orb: your click survives as a tap ({}t{}) - left exactly where you made it", now,
+                            tapSaved ? ", 3 more frames of hold would have killed it" : "");
+                    }
                     originalOrbUsed = true;
                     buf.orbClick = buf.assumeOrbs;
                     return 0;
@@ -2282,7 +2313,14 @@ namespace {
                     if (k > legacyAlignEnd && clickMs() > buf.budgetMs) {
                         break;
                     }
+                    // v3.3: hold and tap are both tried; an orb timing that only works as a tap
+                    // is the timing you actually make.
                     int ret = simulate(layer, p1, p2, dual, k, true, horizon, releaseAfter, horizon, &end);
+                    if (orbTapRelease > 0 && releaseAfter > orbTapRelease) {
+                        SimEnd te;
+                        int tapRet = simulate(layer, p1, p2, dual, k, true, horizon, orbTapRelease, horizon, &te);
+                        ret = std::max(ret, tapRet);
+                    }
                     bool uses = usesNearPress(k);
                     if (buf.explain) {
                         trace += fmt::format(" +{}:{}{}", k, ret, uses ? "o" : "-");
@@ -4938,7 +4976,7 @@ $on_mod(Loaded) {
     if (Loader::get()->isModLoaded("square3ang.cbfextrapolate")) {
         say("CBF Extrapolate detected: visual only, predictions unaffected");
     }
-    say("v3.2 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
+    say("v3.3 loaded (GD 2.2091). F3 x4 opens the menu, F6 cycles the stage, F10 shows the path");
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
